@@ -22,10 +22,13 @@ from marqo.s2_inference.errors import InvalidModelPropertiesError, ImageDownload
 from marqo.s2_inference.logger import get_logger
 from marqo.s2_inference.processing.custom_clip_utils import HFTokenizer, download_model
 from marqo.s2_inference.types import *
+from marqo.s2_inference.triton_export import script_open_clip_model, generate_image_clip_config, generate_text_clip_config
 from marqo.tensor_search.enums import ModelProperties, InferenceParams
 from marqo.tensor_search.models.private_models import ModelLocation
 from marqo.tensor_search.telemetry import RequestMetrics
 from marqo import marqo_docs
+from marqo.tensor_search.enums import EnvVars
+from marqo.tensor_search.utils import read_env_vars_and_defaults
 
 logger = get_logger(__name__)
 
@@ -494,6 +497,8 @@ class FP16_CLIP(CLIP):
         self.tokenizer = clip.tokenize
         self.model.eval()
 
+import tritonclient.grpc as grpcclient
+from tritonclient.utils import InferenceServerException
 
 class OPEN_CLIP(CLIP):
     def __init__(self, model_type: str = "open_clip/ViT-B-32-quickgelu/laion400m_e32", device: str = None,  embedding_dim: int = None,
@@ -501,6 +506,13 @@ class OPEN_CLIP(CLIP):
         super().__init__(model_type, device,  embedding_dim, truncate , **kwargs)
         self.model_name = model_type.split("/", 3)[1] if model_type.startswith("open_clip/") else model_type
         self.pretrained = model_type.split("/", 3)[2] if model_type.startswith("open_clip/") else model_type
+
+        self.friendly_name = self.model_name + "_" + self.pretrained
+        self.friendly_text_name = self.friendly_name + "_text_encoder"
+        self.friendly_image_name = self.friendly_name + "_image_encoder"
+
+        url = read_env_vars_and_defaults(EnvVars.TRITON_GRPC_URL)
+        self.triton_client = grpcclient.InferenceServerClient(url=url)
 
     def load(self) -> None:
         # https://github.com/mlfoundations/open_clip
@@ -540,7 +552,27 @@ class OPEN_CLIP(CLIP):
             self.model, self.preprocess = self.custom_clip_load()
             self.tokenizer = self.load_tokenizer()
 
-            self.model.eval()
+        image_encoder, text_encoder = script_open_clip_model(self.model)
+        os.makedirs(os.path.join(ModelCache.triton_model_repository_path, self.friendly_text_name, "1"), exist_ok=True)
+        os.makedirs(os.path.join(ModelCache.triton_model_repository_path, self.friendly_image_name, "1"), exist_ok=True)
+        text_encoder.save(os.path.join(ModelCache.triton_model_repository_path, self.friendly_text_name, "1", "model.pt"))
+        image_encoder.save(os.path.join(ModelCache.triton_model_repository_path, self.friendly_image_name, "1", "model.pt"))
+
+        generate_text_clip_config(
+            os.path.join(ModelCache.triton_model_repository_path, self.friendly_text_name), 
+            self.friendly_text_name, 
+            self.tokenizer.context_length, 
+            self.model_properties.get("dimensions")
+        )
+
+        generate_image_clip_config(
+            os.path.join(ModelCache.triton_model_repository_path, self.friendly_image_name),
+            self.friendly_image_name,
+            (3, *self.model.visual.preprocess_cfg["size"]),
+            self.model_properties.get("dimensions")
+        )
+        self.triton_client.load_model(self.friendly_text_name)
+        self.triton_client.load_model(self.friendly_image_name)
 
     def custom_clip_load(self):
         self.model_name = self.model_properties.get("name", None)
@@ -603,20 +635,18 @@ class OPEN_CLIP(CLIP):
                      image_download_headers: Optional[Dict] = None,
                      normalize=True) -> FloatTensor:
 
-        self.image_input_processed: Tensor = self._preprocess_images(images, image_download_headers)
+        image_input_processed: np.ndarray = self._preprocess_images(images, image_download_headers).numpy()
 
-        with torch.no_grad():
-            if self.device.startswith("cuda"):
-                with torch.cuda.amp.autocast():
-                    outputs = self.model.encode_image(self.image_input_processed).to(torch.float32)
-            else:
-                outputs = self.model.encode_image(self.image_input_processed).to(torch.float32)
+        image_input = grpcclient.InferInput('input__0', image_input_processed.shape, 'FP32')
+        image_input.set_data_from_numpy(image_input_processed)
+        outputs = self.triton_client.infer(model_name=self.friendly_image_name, inputs=[image_input]).as_numpy('output__0')
 
         if normalize:
             _shape_before = outputs.shape
-            outputs /= self.normalize(outputs)
+            # outputs /= self.normalize(outputs)
+            outputs = outputs / np.linalg.norm(outputs, axis=-1, keepdims=True)
             assert outputs.shape == _shape_before
-        return self._convert_output(outputs)
+        return outputs
 
 
     def encode_text(self, sentence: Union[str, List[str]], normalize=True) -> FloatTensor:
@@ -624,21 +654,18 @@ class OPEN_CLIP(CLIP):
         if self.model is None:
             self.load()
 
-        text = self.tokenizer(sentence).to(self.device)
-
-        with torch.no_grad():
-            if self.device.startswith("cuda"):
-                with torch.cuda.amp.autocast():
-                    outputs = self.model.encode_text(text).to(torch.float32)
-            else:
-                outputs = self.model.encode_text(text).to(torch.float32)
+        text = self.tokenizer(sentence).numpy()
+        text_input = grpcclient.InferInput('input__0', text.shape, 'INT64')
+        text_input.set_data_from_numpy(text)
+        outputs = self.triton_client.infer(model_name=self.friendly_text_name, inputs=[text_input]).as_numpy('output__0')
 
         if normalize:
             _shape_before = outputs.shape
-            outputs /= self.normalize(outputs)
+            # outputs /= self.normalize(outputs)
+            outputs = outputs / np.linalg.norm(outputs, axis=-1, keepdims=True)
             assert outputs.shape == _shape_before
 
-        return self._convert_output(outputs)
+        return outputs
 
 
 class MULTILINGUAL_CLIP(CLIP):

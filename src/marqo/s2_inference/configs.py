@@ -13,6 +13,8 @@ class ModelCache:
     clip_cache_path = os.getenv('CLIP_SAVE_PATH', f'{utils.get_marqo_root_from_env()}/cache/clip/')
     # The hf_cache_path is managed by the hf_hub_download function
     hf_cache_path = os.getenv('HF_SAVE_PATH', f'{utils.get_marqo_root_from_env()}/cache/hf/')
+    # The triton model repository path
+    triton_model_repository_path = os.getenv('TRITON_MODEL_REPOSITORY_PATH', f'{utils.get_marqo_root_from_env()}/cache/model_repository/')
 
 class BaseTransformerModels:
 

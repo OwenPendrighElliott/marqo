@@ -36,6 +36,11 @@ docker run --detach --name vespa --hostname vespa-tutorial \
 (cd scripts/vespa_local && zip -r - * | curl --header "Content-Type:application/zip" --data-binary @- http://localhost:19071/application/v2/tenant/default/prepareandactivate)
 ```
 
+5. Start triton inference server
+```bash
+(cd src/marqo && mkdir -p cache && cd cache && docker run --detach -it --shm-size=256m --rm -p8000:8000 -p8001:8001 -p8002:8002 -v ${PWD}/model_repository:/models nvcr.io/nvidia/tritonserver:24.07-py3 tritonserver --model-repository=/models --model-control-mode=explicit)
+```
+
 You can verify that Vespa has been set up correctly by visiting `http://localhost:8080` in your browser.
 
 ### Option A. Run the Marqo application locally (outside of docker) through IDE
@@ -66,6 +71,7 @@ export MARQO_LOG_LEVEL=debug
 export VESPA_CONFIG_URL=http://localhost:19071
 export VESPA_DOCUMENT_URL=http://localhost:8080
 export VESPA_QUERY_URL=http://localhost:8080
+export TRITON_GRPC_URL=localhost:8001
 export PYTHONPATH="${PYTHONPATH}:$(pwd)/src"
 cd src/marqo/tensor_search
 uvicorn api:app --host 0.0.0.0 --port 8882 --reload
