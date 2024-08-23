@@ -26,22 +26,21 @@ pip install -r requirements.dev.txt
 
 3. Pull and run the Vespa docker image
 ```bash
-docker run --detach --name vespa --hostname vespa-tutorial \
-  --publish 8080:8080 --publish 19071:19071 \
-  vespaengine/vespa:latest
+docker run --detach --name vespa --hostname vespa-tutorial --publish 8080:8080 --publish 19071:19071 vespaengine/vespa:latest
 ```
 
 4. Configure Vespa by deploying to the provided application package `scripts/vespa_local`
 ```bash
 (cd scripts/vespa_local && zip -r - * | curl --header "Content-Type:application/zip" --data-binary @- http://localhost:19071/application/v2/tenant/default/prepareandactivate)
 ```
+You can verify that Vespa has been set up correctly by visiting `http://localhost:8080` in your browser.
+
 
 5. Start triton inference server
 ```bash
 (cd src/marqo && mkdir -p cache && cd cache && docker run --detach -it --shm-size=256m --rm -p8000:8000 -p8001:8001 -p8002:8002 -v ${PWD}/model_repository:/models nvcr.io/nvidia/tritonserver:24.07-py3 tritonserver --model-repository=/models --model-control-mode=explicit)
 ```
 
-You can verify that Vespa has been set up correctly by visiting `http://localhost:8080` in your browser.
 
 ### Option A. Run the Marqo application locally (outside of docker) through IDE
 Now you can run Marqo locally through your IDE (e.g. PyCharm) by following the steps below.
