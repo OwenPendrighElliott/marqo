@@ -4,8 +4,8 @@ from unittest import mock
 from marqo.core.models.marqo_index import *
 from marqo.core.models.marqo_index_request import FieldRequest
 from marqo.tensor_search import tensor_search
-from marqo.tensor_search.models.add_docs_objects import AddDocsParams
-from tests.marqo_test import MarqoTestCase
+from marqo.core.models.add_docs_params import AddDocsParams
+from tests.marqo_test import MarqoTestCase, TestImageUrls
 
 
 class TestImagePreprocessing(MarqoTestCase):
@@ -44,7 +44,7 @@ class TestImagePreprocessing(MarqoTestCase):
         self.device_patcher.stop()
 
     def test_image_preprocess_search_highlights_format(self):
-        image_url = "https://raw.githubusercontent.com/marqo-ai/marqo/mainline/examples/ImageSearchGuide/data/image1.jpg"
+        image_url = TestImageUrls.IMAGE1.value
 
         documents = [{"image_field_1": image_url, "_id": "1"}]
 
@@ -52,8 +52,8 @@ class TestImagePreprocessing(MarqoTestCase):
             tensor_fields = None if index_name == self.structured_image_index else ["image_field_1"]
 
             with self.subTest(f"index_name = {index_name}"):
-                tensor_search.add_documents(config=self.config,
-                                            add_docs_params=AddDocsParams(index_name=index_name,
+                self.add_documents(config=self.config,
+                                   add_docs_params=AddDocsParams(index_name=index_name,
                                                                           docs=documents,
                                                                           tensor_fields=tensor_fields))
                 search_result = tensor_search.search(config=self.config,
@@ -66,7 +66,7 @@ class TestImagePreprocessing(MarqoTestCase):
                 self.assertEqual(4, len(eval(search_result["hits"][0]["_highlights"][0]["image_field_1"])))
 
     def test_image_preprocess_get_documents_format(self):
-        image_url = "https://raw.githubusercontent.com/marqo-ai/marqo/mainline/examples/ImageSearchGuide/data/image1.jpg"
+        image_url = TestImageUrls.IMAGE1.value
 
         documents = [{"image_field_1": image_url, "_id": "1"}]
 
@@ -74,8 +74,8 @@ class TestImagePreprocessing(MarqoTestCase):
             tensor_fields = None if index_name == self.structured_image_index else ["image_field_1"]
 
             with self.subTest(f"index_name = {index_name}"):
-                tensor_search.add_documents(config=self.config,
-                                            add_docs_params=AddDocsParams(index_name=index_name,
+                self.add_documents(config=self.config,
+                                   add_docs_params=AddDocsParams(index_name=index_name,
                                                                           docs=documents,
                                                                           tensor_fields=tensor_fields))
                 get_doc_result = tensor_search.get_document_by_id(config=self.config,

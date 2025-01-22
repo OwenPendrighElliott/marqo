@@ -1,11 +1,10 @@
 import unittest
+import pytest
 
 import httpx
 
 from marqo import marqo_docs
 
-
-@unittest.skip
 class TestDocumentation(unittest.TestCase):
     def test_urls(self):
         # Retrieve all public functions in the module
@@ -14,7 +13,6 @@ class TestDocumentation(unittest.TestCase):
 
         # Verify all URLs return a 200 response
         for func in public_functions:
-            print(f"public_functions: {public_functions}")
             with self.subTest(func=func):
                 url = getattr(marqo_docs, func)()
                 print(f"url: {url}")

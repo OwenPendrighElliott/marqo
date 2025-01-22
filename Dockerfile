@@ -6,7 +6,7 @@ COPY vespa .
 RUN mvn clean package
 
 # Stage 2: Base image for Python setup
-FROM marqoai/marqo-base:20 as base_image
+FROM marqoai/marqo-base:48 as base_image
 
 # Allow mounting volume containing data and configs for vespa
 VOLUME /opt/vespa/var
@@ -20,10 +20,6 @@ ARG TARGETPLATFORM
 ARG COMMITHASH
 WORKDIR /app
 
-COPY requirements.txt requirements.txt
-RUN pip3 install --no-cache-dir -r requirements.txt
-RUN rm requirements.txt
-
 # Stage 3: Final stage that builds on the base image
 FROM base_image
 
@@ -31,6 +27,7 @@ COPY --from=maven_build /app/vespa/target/marqo-custom-searchers-deploy.jar /app
 COPY scripts/ /app/scripts
 COPY run_marqo.sh /app/run_marqo.sh
 COPY src /app/src
+
 
 ENV PYTHONPATH "${PYTHONPATH}:/app"
 RUN chmod +x ./run_marqo.sh

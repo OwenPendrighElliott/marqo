@@ -6,17 +6,19 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from json import JSONDecodeError
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union, Tuple
 from urllib.parse import urlparse
 
+import httpcore
 import httpx
 
 import marqo.logging
 import marqo.vespa.concurrency as conc
+from marqo.core.models import MarqoIndex
 from marqo.vespa.exceptions import (VespaStatusError, VespaError, InvalidVespaApplicationError,
-                                    VespaTimeoutError, VespaNotConvergedError)
+                                    VespaTimeoutError, VespaNotConvergedError, VespaActivationConflictError)
 from marqo.vespa.models import VespaDocument, QueryResult, FeedBatchDocumentResponse, FeedBatchResponse, \
-    FeedDocumentResponse, UpdateDocumentsBatchResponse, UpdateDocumentResponse
+    FeedDocumentResponse, UpdateDocumentsBatchResponse, UpdateDocumentResponse, FeedBatchDocumentResponse
 from marqo.vespa.models.application_metrics import ApplicationMetrics
 from marqo.vespa.models.delete_document_response import DeleteDocumentResponse, DeleteBatchDocumentResponse, \
     DeleteBatchResponse, DeleteAllDocumentsResponse
@@ -28,7 +30,8 @@ logger = marqo.logging.get_logger(__name__)
 
 class VespaClient:
     _VESPA_ERROR_CODE_TO_EXCEPTION = {
-        'INVALID_APPLICATION_PACKAGE': InvalidVespaApplicationError
+        'INVALID_APPLICATION_PACKAGE': InvalidVespaApplicationError,
+        'ACTIVATION_CONFLICT': VespaActivationConflictError
     }
 
     class _ConvergenceStatus:
@@ -38,8 +41,8 @@ class VespaClient:
             self.converged = converged
 
     def __init__(self, config_url: str, document_url: str, query_url: str,
-                 content_cluster_name: str, default_search_timeout_ms: int = 1000, 
-                 pool_size: int = 10, feed_pool_size: int = 10, get_pool_size: int = 10, 
+                 content_cluster_name: str, default_search_timeout_ms: int = 1000,
+                 pool_size: int = 10, feed_pool_size: int = 10, get_pool_size: int = 10,
                  delete_pool_size: int = 10, partial_update_pool_size: int = 10):
         """
         Create a VespaClient object.
@@ -92,6 +95,29 @@ class VespaClient:
 
         self._raise_for_status(response)
 
+    def create_deployment_session(self, check_for_application_convergence: bool = True) -> Tuple[str, str]:
+        """
+        Create a Vespa deployment session.
+        Args:
+            check_for_application_convergence: check for the application to converge before create a deployment session.
+
+        Returns:
+            Tuple[str, str]:
+             - content_base_url is the base url for contents in this session
+             - prepare_url is the url for prepare this session
+
+        Please note that the session created is local in one config server and will be replicated to multiple servers
+        via Zookeeper. Following requests should use content_base_url and prepare_url to make sure it can hit the right
+        config server that this session is created on.
+        """
+        if check_for_application_convergence:
+            self.check_for_application_convergence()
+
+        res = self._create_deploy_session(self.http_client)
+        content_base_url = res['content']
+        prepare_url = res['prepared']
+        return content_base_url, prepare_url
+
     def download_application(self, check_for_application_convergence: bool = False) -> str:
         """
         Args:
@@ -119,7 +145,7 @@ class VespaClient:
             self.check_for_application_convergence()
 
         with httpx.Client() as httpx_client:
-            session_id = self._create_deploy_session(httpx_client)
+            session_id = self._create_deploy_session(httpx_client)['session-id']
             return self._download_application(session_id, httpx_client)
 
     def check_for_application_convergence(self) -> None:
@@ -162,13 +188,18 @@ class VespaClient:
         """
         start_time = time.time()
         while time.time() - start_time < timeout:
-            if self.get_application_has_converged():
-                return
-            else:
-                logger.debug('Waiting for Vespa application to converge')
-                time.sleep(1)
+            try:
+                if self.get_application_has_converged():
+                    return
+                else:
+                    logger.debug('Waiting for Vespa application to converge')
+                    time.sleep(1)
+            # TODO Find out what exceptions is raised here
+            except (httpx.TimeoutException, httpcore.TimeoutException):
+                logger.error("Marqo timed out waiting for Vespa application to converge. Will retry.")
 
-        raise VespaError(f"Vespa application did not converge within {timeout} seconds")
+        raise VespaError(f"Vespa application did not converge within {timeout} seconds. "
+                         f"The convergence status is {self._get_convergence_status()}")
 
     def query(self, yql: str, hits: int = 10, ranking: str = None, model_restrict: str = None,
               query_features: Dict[str, Any] = None, timeout: float = None, **kwargs) -> QueryResult:
@@ -524,6 +555,62 @@ class VespaClient:
 
         return ApplicationMetrics(**resp.json())
 
+    def get_index_setting_by_name(self, index_name: str) -> Optional[MarqoIndex]:
+        try:
+            resp = self.http_client.get(f'{self.document_url}/index-settings/{index_name}')
+        except httpx.HTTPError as e:
+            raise VespaError(e) from e
+
+        if resp.status_code == 404:
+            return None
+
+        self._raise_for_status(resp)
+
+        return MarqoIndex.parse_obj(resp.json())
+
+    def get_all_index_settings(self) -> List[MarqoIndex]:
+        try:
+            resp = self.http_client.get(f'{self.document_url}/index-settings')
+        except httpx.HTTPError as e:
+            raise VespaError(e) from e
+
+        self._raise_for_status(resp)
+
+        index_list = resp.json()
+        if isinstance(index_list, list):
+            return [MarqoIndex.parse_obj(item) for item in index_list]
+
+        raise VespaError(f'Get all index settings returns invalid response: {index_list}')
+
+    def translate_vespa_document_response(self, status: int, message: Optional[str]=None) -> Tuple[int, Optional[str]]:
+        """A helper function to translate Vespa document response into the expected status, message that
+        is used in Marqo document API responses.
+
+        Args:
+            status: The status code from Vespa document response
+
+        Return:
+            A tuple of status code and the message in the response
+        """
+        vespa_status_code_to_marqo_doc_error_map = {
+            200: (200, None),
+            404: (404, "Document does not exist in the index"),
+            # Update documents get 412 from Vespa for document not found as we use condition
+            412: (404, "Document does not exist in the index"),
+            429: (429, "Marqo vector store receives too many requests. Please try again later"),
+            507: (400, "Marqo vector store is out of memory or disk space"),
+        }
+
+        if status in vespa_status_code_to_marqo_doc_error_map:
+            return vespa_status_code_to_marqo_doc_error_map[status]
+        elif status == 400 and isinstance(message, str) and "could not parse field" in message.lower():
+            # TODO Block the invalid special characters before sending to Vespa
+            return 400, f"The document contains invalid characters in the fields. Original error: {message} "
+        else:
+            logger.error(f"An unexpected error occurred from the Vespa document response. "
+                         f"status: {status}, message: {message}")
+            return 500, f"Marqo vector store returns an unexpected error with this document. Original error: {message}"
+
     def _add_query_params(self, url: str, query_params: Dict[str, str]) -> str:
         if not query_params:
             return url
@@ -546,7 +633,7 @@ class VespaClient:
         byte_stream.seek(0)
         return byte_stream
 
-    def _create_deploy_session(self, httpx_client: httpx.Client) -> int:
+    def _create_deploy_session(self, httpx_client: httpx.Client) -> Dict:
         endpoint = f'{self.config_url}/application/v2/tenant/default/session?from=' \
                    f'{self.config_url}/application/v2/tenant/default/application/default/environment' \
                    f'/default/region/default/instance/default'
@@ -555,7 +642,74 @@ class VespaClient:
 
         self._raise_for_status(response)
 
-        return response.json()['session-id']
+        return response.json()
+
+    def get_content_url(self, content_base_url: str, *paths: str) -> str:
+        return f'{content_base_url}{"/".join(paths)}'
+
+    def list_contents(self, content_base_url: str) -> List[str]:
+        endpoint = f'{content_base_url}?recursive=true'
+
+        response = self.http_client.get(endpoint)
+
+        self._raise_for_status(response)
+
+        return response.json()
+
+    def get_text_content(self, content_base_url: str, *path: str) -> str:
+        endpoint = f'{content_base_url}{"/".join(path)}'
+
+        response = self.http_client.get(endpoint)
+
+        self._raise_for_status(response)
+
+        return response.text
+
+    def get_binary_content(self, content_base_url: str, *path: str) -> bytes:
+        endpoint = f'{content_base_url}{"/".join(path)}'
+
+        response = self.http_client.get(endpoint)
+
+        self._raise_for_status(response)
+
+        return response.content
+
+    def put_content(self, content_base_url: str, content: Union[str, bytes], *path: str) -> None:
+        endpoint = f'{content_base_url}{"/".join(path)}'
+
+        response = self.http_client.put(endpoint, content=content)
+
+        self._raise_for_status(response)
+
+    def delete_content(self, content_base_url: str, *path: str) -> None:
+        endpoint = f'{content_base_url}{"/".join(path)}'
+
+        response = self.http_client.delete(endpoint)
+
+        self._raise_for_status(response)
+
+    def prepare(self, prepare_url: str, timeout: int):
+        response = self.http_client.put(prepare_url, timeout=timeout)
+
+        self._raise_for_status(response)
+
+        return response.json()
+
+    def activate(self, activate_url: str, timeout: int):
+        response = self.http_client.put(activate_url, timeout=timeout)
+
+        self._raise_for_status(response)
+
+        return response.json()
+
+    def get_vespa_version(self) -> str:
+        endpoint = f'{self.config_url}/state/v1/version'
+
+        response = self.http_client.get(endpoint)
+
+        self._raise_for_status(response)
+
+        return response.json()['version']
 
     def _download_application(self, session_id: int, httpx_client: httpx.Client) -> str:
         endpoint = f'{self.config_url}/application/v2/tenant/default/session/{session_id}/content/?recursive=true'
@@ -675,46 +829,82 @@ class VespaClient:
         doc_id = document.id
         data = {'fields': document.fields}
 
+        # only used for documents that are not updated
+        error_doc_path_id = f"/document/v1/{schema}/{schema}/docid/{doc_id}"
+
         async with semaphore:
             end_point = f'{self.document_url}/document/v1/{schema}/{schema}/docid/{doc_id}?create=false'
             data["condition"] = f'{schema}.{vespa_id_field}==\"{doc_id}\"'
             try:
                 resp = await async_client.put(end_point, json=data, timeout=timeout)
-            except httpx.HTTPError as e:
-                raise VespaError(e) from e
+            except httpx.RequestError as e:
+                logger.error(e, exc_info=True)
+                return UpdateDocumentResponse(status=500, message="Network Error", id=doc_id, path_id=error_doc_path_id)
 
+        # Handle other exceptions
         try:
-            # This will cover 200 and document-specific errors. Other unexpected errors will be raised.
             return UpdateDocumentResponse(**resp.json(), status=resp.status_code)
-        except JSONDecodeError:
+        except JSONDecodeError as e:
             if resp.status_code == 200:
-                # A 200 response shouldn't reach here
-                raise VespaError(f'Unexpected response: {resp.text}')
+                # A 200 response shouldn't reach here, so we error out the whole batch
+                raise VespaError(cause=e, message=f"Unexpected response from Vespa: {resp.text}") from e
 
-            self._raise_for_status(resp)
+            try:
+                self._raise_for_status(resp)
+            except VespaStatusError as e:
+                logger.error(e, exc_info=True)
+                return UpdateDocumentResponse(status=resp.status_code, message=e.message, id=doc_id,
+                                              error_doc_path_id=error_doc_path_id)
 
     async def _feed_document_async(self, semaphore: asyncio.Semaphore, async_client: httpx.AsyncClient,
                                    document: VespaDocument, schema: str,
                                    timeout: int) -> FeedBatchDocumentResponse:
+        """An async method to feed a document to Vespa.
+
+        Note: This method is used by the async feed batch method to feed documents concurrently. Unhandled exceptions
+        will be raised in the main thread and leads a 500 error for the whole batch. Therefore, exceptions should be
+        handled gracefully in this method for the specific document. We should keep the error message as similar as the
+        Vespa error messages since this is a low level method. Overwrite the error message in higher level methods.
+
+        Exceptions that are handled in this method:
+        1. httpx.RequestError: We convert this error to a 500 error for the specific document and put 'Network Error' in
+        the message.
+        2. JSONDecodeError: If the Vespa response is 200 but the response can not be decoded, we raise a VespaError and
+        this will block the whole batch as this indicates an unexpected response from Vespa.
+        3. httpx.status_codes.HTTPStatusError: We catch the error and return it to marqo.core.document methods to handle
+        it.
+
+        Raises:
+            VespaError: If the Vespa response is 200 but the response can not be decoded.
+
+        Returns:
+            FeedDocumentResponse object
+        """
         doc_id = document.id
         data = {'fields': document.fields}
 
         async with semaphore:
             end_point = f'{self.document_url}/document/v1/{schema}/{schema}/docid/{doc_id}'
+            # Handle httpx.RequestError
             try:
                 resp = await async_client.post(end_point, json=data, timeout=timeout)
-            except httpx.HTTPError as e:
-                raise VespaError(e) from e
+            except httpx.RequestError as e:
+                logger.error(e, exc_info=True)
+                return FeedBatchDocumentResponse(status=500, message="Network Error", id=doc_id)
 
+        # Handle other exceptions
         try:
-            # This will cover 200 and document-specific errors. Other unexpected errors will be raised.
             return FeedBatchDocumentResponse(**resp.json(), status=resp.status_code)
         except JSONDecodeError as e:
             if resp.status_code == 200:
-                # A 200 response shouldn't reach here
-                raise VespaError(f'Unexpected response: {resp.text}') from e
+                # A 200 response shouldn't reach here, so we error out the whole batch
+                raise VespaError(cause=e, message=f"Unexpected response from Vespa: {resp.text}") from e
 
-            self._raise_for_status(resp)
+            try:
+                self._raise_for_status(resp)
+            except VespaStatusError as e:
+                logger.error(e, exc_info=True)
+                return FeedBatchDocumentResponse(status=resp.status_code, message=e.message, id=doc_id)
 
     def _feed_document_sync(self, sync_client: httpx.Client, document: VespaDocument, schema: str,
                             timeout: int) -> FeedBatchDocumentResponse:
@@ -841,7 +1031,7 @@ class VespaClient:
                     ):
                         # The soft doom error is a bug in certain Vespa versions. Newer versions should always return
                         # a code 12 for timeouts
-                        logger.warn('Detected soft doomed query')
+                        logger.warning('Detected soft doomed query')
                         raise VespaTimeoutError(message=resp.text, cause=e) from e
 
                 raise e
@@ -851,6 +1041,14 @@ class VespaClient:
                 raise VespaStatusError(message=resp.text, cause=e) from e
 
     def _raise_for_status(self, resp: httpx.Response) -> None:
+        """Take the response and raise an VespaStatusError if the status code is not 2xx.
+
+        Args:
+            resp: The response object from the httpx client
+
+        Raises:
+            VespaStatusError: If the status code is not 2xx
+        """
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:

@@ -1,30 +1,25 @@
-from marqo.tensor_search.models.add_docs_objects import AddDocsParams
-from marqo.tensor_search import tensor_search
-from marqo.tensor_search import enums
-from marqo.tensor_search.models.api_models import BulkSearchQuery, BulkSearchQueryEntity, ScoreModifierLists
-from tests.marqo_test import MarqoTestCase
-from marqo.tensor_search.tensor_search import add_documents
-from marqo.tensor_search.models.search import SearchContext
-from marqo.tensor_search.api import embed
-import numpy as np
-import requests
-import json
+import os
+import unittest
+import uuid
 from unittest import mock
 from unittest.mock import patch
-from marqo.core.models.marqo_index_request import FieldRequest
-from marqo.api.exceptions import MarqoWebError, IndexNotFoundError, InvalidArgError, DocumentNotFoundError
-import marqo.exceptions as base_exceptions
-from marqo.core.models.marqo_index import *
-from marqo.vespa.models import VespaDocument, QueryResult, FeedBatchDocumentResponse, FeedBatchResponse, \
-    FeedDocumentResponse
-from marqo.vespa.models.query_result import Root, Child, RootFields
-from marqo.tensor_search.models.private_models import S3Auth, ModelAuth, HfAuth
+
+import numpy as np
+import pytest
+import torch
+
 from marqo.api.models.embed_request import EmbedRequest
-import os
-import pprint
-import unittest
-import httpx
-import uuid
+from marqo.core.models.add_docs_params import AddDocsParams
+from marqo.core.models.marqo_index import *
+from marqo.core.models.marqo_index_request import FieldRequest
+from marqo.tensor_search import enums
+from marqo.tensor_search import tensor_search
+from marqo.tensor_search.api import embed
+from marqo.tensor_search.models.private_models import S3Auth, ModelAuth
+from marqo.vespa.models import QueryResult
+from marqo.vespa.models.query_result import Root, Child, RootFields
+from tests.marqo_test import MarqoTestCase, TestImageUrls
+from marqo.api.exceptions import InvalidArgError
 
 
 class TestEmbed(MarqoTestCase):
@@ -67,6 +62,18 @@ class TestEmbed(MarqoTestCase):
             treat_urls_and_pointers_as_images=True
         )
 
+        unstructured_image_index_request = cls.unstructured_marqo_index_request(
+            name="unstructured_image_index" + str(uuid.uuid4()).replace('-', ''),
+            model=Model(name="open_clip/ViT-B-32/laion2b_s34b_b79k"),
+            treat_urls_and_pointers_as_images=True
+        )
+
+        unstructured_languagebind_index = cls.unstructured_marqo_index_request(
+            model=Model(name='LanguageBind/Video_V1.5_FT_Audio_FT_Image'),
+            treat_urls_and_pointers_as_images=True,
+            treat_urls_and_pointers_as_media=True
+        )
+
         # STRUCTURED indexes
         structured_default_text_index = cls.structured_marqo_index_request(
             model=Model(name="hf/all_datasets_v4_MiniLM-L6"),
@@ -95,6 +102,25 @@ class TestEmbed(MarqoTestCase):
             tensor_fields=["text_field_1", "text_field_2", "image_field_1", "image_field_2"]
         )
 
+        structured_image_index_request = cls.structured_marqo_index_request(
+            name="structured_image_index" + str(uuid.uuid4()).replace('-', ''),
+            fields=[
+                FieldRequest(name="image_field_1", type=FieldType.ImagePointer),
+                FieldRequest(name="text_field_1", type=FieldType.Text,
+                             features=[FieldFeature.Filter, FieldFeature.LexicalSearch]),
+                FieldRequest(
+                    name="multimodal_field", 
+                    type=FieldType.MultimodalCombination,
+                    dependent_fields={
+                        "image_field_1": 1.0,
+                        "text_field_1": 0.0
+                    }
+                )
+            ],
+            model=Model(name="open_clip/ViT-B-32/laion2b_s34b_b79k"),
+            tensor_fields=["image_field_1", "text_field_1", "multimodal_field"]
+        )
+
         structured_image_index_with_random_model = cls.structured_marqo_index_request(
             model=Model(name='random/small'),
             fields=[
@@ -119,15 +145,29 @@ class TestEmbed(MarqoTestCase):
             tensor_fields=["text_field_1", "text_field_2", "image_field_1"]
         )
 
+        structured_languagebind_index = cls.structured_marqo_index_request(
+            model=Model(name='LanguageBind/Video_V1.5_FT_Audio_FT_Image'),
+            fields=[
+                FieldRequest(name="text_field_1", type=FieldType.Text),
+                FieldRequest(name="text_field_2", type=FieldType.Text),
+                FieldRequest(name="image_field_1", type=FieldType.ImagePointer)
+            ],
+            tensor_fields=["text_field_1", "text_field_2", "image_field_1"]
+        )
+
         cls.indexes = cls.create_indexes([
             unstructured_default_text_index,
             unstructured_default_image_index,
             unstructured_image_index_with_random_model,
             unstructured_image_index_with_test_prefix,
+            unstructured_image_index_request,
+            unstructured_languagebind_index,
             structured_default_text_index,
             structured_default_image_index,
+            structured_image_index_request,
             structured_image_index_with_random_model,
-            structured_image_index_with_test_prefix
+            structured_image_index_with_test_prefix,
+            structured_languagebind_index
         ])
 
         # Assign to objects so they can be used in tests
@@ -135,10 +175,14 @@ class TestEmbed(MarqoTestCase):
         cls.unstructured_default_image_index = cls.indexes[1]
         cls.unstructured_image_index_with_random_model = cls.indexes[2]
         cls.unstructured_image_index_with_test_prefix = cls.indexes[3]
-        cls.structured_default_text_index = cls.indexes[4]
-        cls.structured_default_image_index = cls.indexes[5]
-        cls.structured_image_index_with_random_model = cls.indexes[6]
-        cls.structured_image_index_with_test_prefix = cls.indexes[7]
+        cls.unstructured_image_index_request = cls.indexes[4]
+        cls.unstructured_languagebind_index = cls.indexes[5]
+        cls.structured_default_text_index = cls.indexes[6]
+        cls.structured_default_image_index = cls.indexes[7]
+        cls.structured_image_index_request = cls.indexes[8]
+        cls.structured_image_index_with_random_model = cls.indexes[9]
+        cls.structured_image_index_with_test_prefix = cls.indexes[10]
+        cls.structured_languagebind_index = cls.indexes[11]
 
     def setUp(self) -> None:
         super().setUp()
@@ -150,6 +194,107 @@ class TestEmbed(MarqoTestCase):
         super().tearDown()
         self.device_patcher.stop()
 
+    def test_embed_content_cuda_device_as_default(self):
+        """
+        Test that embed_content uses the default device when no device is specified.
+        """
+        for index in [self.unstructured_default_text_index, self.structured_default_text_index]:
+            with self.subTest(index=index.type):
+                expected_devices = ["cuda", "cpu"]
+                for expected_device in expected_devices:
+                    with patch.dict(os.environ, {"MARQO_BEST_AVAILABLE_DEVICE": expected_device}):
+                        with patch('marqo.tensor_search.tensor_search.run_vectorise_pipeline') as mock_vectorise:
+                            mock_vectorise.return_value = {0: [0.1, 0.2, 0.3]}
+
+                            embed_res = embed(
+                                marqo_config=self.config,
+                                index_name=index.name,
+                                embedding_request=EmbedRequest(
+                                    content=["This is a test document"]
+                                ),
+                                device=None
+                            )
+                        
+                        # Check that run_vectorise_pipeline was called
+                        mock_vectorise.assert_called_once()
+                        
+                        # Get the arguments passed to run_vectorise_pipeline
+                        args, kwargs = mock_vectorise.call_args
+                        
+                        # Print the args and kwargs for debugging
+                        print(f"args passed to run_vectorise_pipeline: {args}")
+                        print(f"kwargs passed to run_vectorise_pipeline: {kwargs}")
+                        
+                        # Check that the device passed to run_vectorise_pipeline matches the expected value
+                        self.assertEqual(args[2], expected_device)
+
+                        # Check the result
+                        self.assertEqual(embed_res["content"], ["This is a test document"])
+                        self.assertIsInstance(embed_res["embeddings"][0], list)
+                        self.assertEqual(embed_res["embeddings"][0], [0.1, 0.2, 0.3])
+
+    def test_embed_image_url_as_image_not_text(self):
+        """
+        Test that image URLs are embedded as images and not as text using the embed function.
+        """
+        image_url = TestImageUrls.IMAGE2.value
+        
+        # Expected vector for the image (same as in test_multimodal_image_url_is_embedded_as_image_not_text)
+        expected_vector = [-0.06504671275615692, -0.03672310709953308, -0.06603428721427917,
+                        -0.032505638897418976, -0.06116769462823868, -0.03929287940263748]
+
+        for index in [self.unstructured_image_index_request, self.structured_image_index_request]:
+            with self.subTest(index=index.type):
+                embed_res = embed(
+                    marqo_config=self.config,
+                    index_name=index.name,
+                    embedding_request=EmbedRequest(
+                        content=[image_url]
+                    ),
+                    device="cpu"
+                )
+
+                # Get the actual vector
+                actual_vector = embed_res["embeddings"][0]
+
+                # Assert that the vector is similar to expected_vector
+                for i, expected_value in enumerate(expected_vector):
+                    self.assertAlmostEqual(actual_vector[i], expected_value, places=4,
+                                        msg=f"Mismatch at index {i} for {index.type}")
+                    
+
+    @pytest.mark.largemodel
+    @pytest.mark.skipif(torch.cuda.is_available() is False, reason="We skip the large model test if we don't have cuda support")
+    def test_embed_languagebind(self):
+        content = [
+            #TestImageUrls.HIPPO_REALISTIC.value, # image
+            "https://marqo-k400-video-test-dataset.s3.amazonaws.com/videos/---QUuC4vJs_000084_000094.mp4" # video
+        ]
+        for index in [self.unstructured_languagebind_index, self.structured_languagebind_index]:
+            with self.subTest(index=index.type):
+                embed_res = embed(
+                                marqo_config=self.config,
+                                index_name=index.name,
+                                embedding_request=EmbedRequest(
+                                    content=content
+                                ),
+                                device=None
+                            )
+                #print(embed_res)
+                #print(embed_res['embeddings'][0][:7])
+                expected = [
+                    0.0298048947006464, 0.05226955562829971, -0.0038126774597913027,
+                    0.061151087284088135, -0.013925471343100071, 0.060153547674417496, -0.0031225811690092087
+                ]
+                actual = embed_res['embeddings'][0][:7]
+                
+                for a, e in zip(actual, expected):
+                    self.assertAlmostEqual(a, e, delta=1.5)
+                
+                #print(f"Actual: {actual}")
+                #print(f"Expected: {expected}")
+
+
     def test_embed_equivalent_to_add_docs(self):
         """
         Ensure that the embedding returned by embed endpoint matches the one created by add_docs.
@@ -157,7 +302,7 @@ class TestEmbed(MarqoTestCase):
         """
         for index in [self.unstructured_default_text_index, self.structured_default_text_index]:
             with self.subTest(index=index.type):
-                add_docs_res = tensor_search.add_documents(
+                add_docs_res = self.add_documents(
                     config=self.config, add_docs_params=AddDocsParams(
                         index_name=index.name,
                         docs=[
@@ -202,7 +347,7 @@ class TestEmbed(MarqoTestCase):
         """
         for index in [self.unstructured_default_text_index, self.structured_default_text_index]:
             with self.subTest(index=index.type):
-                add_docs_res = tensor_search.add_documents(
+                add_docs_res = self.add_documents(
                     config=self.config, add_docs_params=AddDocsParams(
                         index_name=index.name,
                         docs=[
@@ -331,7 +476,7 @@ class TestEmbed(MarqoTestCase):
         """
         for index in [self.unstructured_default_image_index, self.structured_default_image_index]:
             with self.subTest(index=index.type):
-                image_url = "https://marqo-assets.s3.amazonaws.com/tests/images/image1.jpg"
+                image_url = TestImageUrls.IMAGE1.value
                 original_query = self.config.vespa_client.query
 
                 def pass_through_query(*arg, **kwargs):
@@ -369,21 +514,21 @@ class TestEmbed(MarqoTestCase):
                 self.assertEqual(embed_res["content"], [image_url])
                 self.assertTrue(np.allclose(embed_res["embeddings"][0], search_query_embedding))
 
-    def test_embed_with_image_download_headers_and_model_auth(self):
+    def test_embed_with_media_download_headers_and_model_auth(self):
         """
-        Ensure that vectorise is called with the correct image_download_headers and model_auth
+        Ensure that vectorise is called with the correct media_download_headers and model_auth
         when using the embed endpoint.
         """
         for index in [self.unstructured_default_image_index, self.structured_default_image_index]:
             with self.subTest(index=index.type):
-                image_url = "https://marqo-assets.s3.amazonaws.com/tests/images/image1.jpg"
+                image_url = TestImageUrls.IMAGE1.value
                 vectorise = s2_inference.vectorise
                 def pass_through_vectorise(*arg, **kwargs):
                     """Vectorise will behave as usual, but we will be able to see the call list
                     via mock
                     Set image download headers and model auth to None so there's no error out.
                     """
-                    kwargs["image_download_headers"] = None
+                    kwargs["media_download_headers"] = None
                     kwargs["model_auth"] = None
                     return vectorise(*arg, **kwargs)
 
@@ -395,7 +540,7 @@ class TestEmbed(MarqoTestCase):
                         marqo_config=self.config, index_name=index.name,
                         embedding_request=EmbedRequest(
                             content=[image_url],
-                            image_download_headers={"Authorization": "my secret key"},
+                            mediaDownloadHeaders={"Authorization": "my secret key"},
                             modelAuth=ModelAuth(s3=S3Auth(
                                 aws_access_key_id='12345',
                                 aws_secret_access_key='this-is-a-secret'))
@@ -410,7 +555,7 @@ class TestEmbed(MarqoTestCase):
                 self.assertEqual(len(call_args), 1)
 
                 vectorise_kwargs = call_args[0].kwargs
-                self.assertEqual(vectorise_kwargs["image_download_headers"], {"Authorization": "my secret key"})
+                self.assertEqual(vectorise_kwargs["media_download_headers"], {"Authorization": "my secret key"})
                 self.assertEqual(vectorise_kwargs["model_auth"], ModelAuth(s3=S3Auth(
                                 aws_access_key_id='12345',
                                 aws_secret_access_key='this-is-a-secret')))
@@ -422,7 +567,7 @@ class TestEmbed(MarqoTestCase):
         """
         for index in [self.unstructured_default_image_index, self.structured_default_image_index]:
             with self.subTest(index=index.type):
-                image_url = "https://marqo-assets.s3.amazonaws.com/tests/images/image1.jpg"
+                image_url = TestImageUrls.IMAGE1.value
                 original_query = self.config.vespa_client.query
                 def pass_through_query(*arg, **kwargs):
                     return original_query(*arg, **kwargs)
@@ -469,7 +614,7 @@ class TestEmbed(MarqoTestCase):
         """
         for index in [self.unstructured_default_image_index, self.structured_default_image_index]:
             with self.subTest(index=index.type):
-                image_url = "https://marqo-assets.s3.amazonaws.com/tests/images/image2.jpg"
+                image_url = TestImageUrls.IMAGE2.value
                 original_query = self.config.vespa_client.query
                 def pass_through_query(*arg, **kwargs):
                     return original_query(*arg, **kwargs)
@@ -602,3 +747,46 @@ class TestEmbed(MarqoTestCase):
                 # Assert vectors are equal
                 self.assertEqual(embed_res_hardcoded["content"], ["test passage: I am the GOAT."])
                 self.assertTrue(np.allclose(embed_res_hardcoded["embeddings"][0], embed_res_prefix_query["embeddings"][0]))
+
+    def test_embed_private_image_proper_error_raised(self):
+        """Test that a proper 400 error is raised when trying to embed a private image and have no access."""
+        test_content_lists = [
+            ("https://d2k91vq0avo7lq.cloudfront.net/ai_hippo_realistic_small", "a single private image url"),
+            (["https://d2k91vq0avo7lq.cloudfront.net/ai_hippo_realistic_small", "test"],
+             "a list of content with a private image url")
+        ]
+
+        for index_name in [self.unstructured_default_image_index.name, self.structured_default_image_index.name]:
+            for test_content, msg in test_content_lists:
+                with self.subTest(f"{index_name} - {msg}"):
+                    with self.assertRaises(InvalidArgError) as e:
+                        embed_res = embed(
+                            marqo_config=self.config, index_name=index_name,
+                            embedding_request=EmbedRequest(
+                                content=test_content
+                            ),
+                            device="cpu"
+                        )
+                        self.assertIn("Error downloading media file", str(e.exception))
+                        self.assertIn("403 Client Error", str(e.exception))
+
+    def test_embed_invalid_image_proper_error_raised(self):
+        """Test that a proper 400 error is raised when trying to embed an invalid image url."""
+        test_content_lists = [
+            ("https://a-dummy-image-url.jpg", "a single invalid image url"),
+            (["https://a-dummy-image-url.jpg", "test"],
+             "a list of content with an invalid image url")
+        ]
+
+        for index_name in [self.unstructured_default_image_index.name, self.structured_default_image_index.name]:
+            for test_content, msg in test_content_lists:
+                with self.subTest(f"{index_name} - {msg}"):
+                    with self.assertRaises(InvalidArgError) as e:
+                        embed_res = embed(
+                            marqo_config=self.config, index_name=index_name,
+                            embedding_request=EmbedRequest(
+                                content=test_content
+                            ),
+                            device="cpu"
+                        )
+                        self.assertIn("Error vectorising content", str(e.exception))

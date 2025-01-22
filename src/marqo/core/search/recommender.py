@@ -43,7 +43,7 @@ class Recommender:
         Args:
             index_name: Name of the index to search
             documents: A list of document IDs or a dictionary where the keys are document IDs and the values are weights
-            tensor_fields: List of tensor fields to use for recommendation
+            tensor_fields: List of tensor fields to use for recommendation (can include text, image, audio, and video fields)
             interpolation_method: Interpolation method to use for combining vectors
             exclude_input_documents: Whether to exclude the input documents from the search results
             result_count: Number of results to return
@@ -80,7 +80,7 @@ class Recommender:
         if len(documents) == 0:
             raise InvalidArgumentError('No documents with non-zero weight provided')
 
-        marqo_index = index_meta_cache.get_index(config.Config(self.vespa_client), index_name=index_name)
+        marqo_index = index_meta_cache.get_index(index_management=self.index_management, index_name=index_name)
 
         if interpolation_method is None:
             interpolation_method = self._get_default_interpolation_method(marqo_index)
@@ -101,7 +101,7 @@ class Recommender:
         marqo_documents = tensor_search.get_documents_by_ids(
             config.Config(self.vespa_client),
             index_name, document_ids, show_vectors=True
-        )
+        ).dict(exclude_none=True, by_alias=True)
 
         # Make sure all documents were found
         not_found = []

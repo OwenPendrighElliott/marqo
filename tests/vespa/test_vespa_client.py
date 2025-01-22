@@ -3,7 +3,9 @@ import os
 import unittest
 from unittest.mock import patch
 
+import httpcore
 import httpx
+import pytest
 import vespa.application as pyvespa
 
 from marqo.vespa import concurrency
@@ -84,9 +86,13 @@ class TestFeedDocumentAsync(AsyncMarqoTestCase):
             VespaDocument(id="doc2", fields={"title": "Title 2"}),
         ]
 
-        with self.assertRaises(VespaError):
-            feed_client.feed_batch(documents, self.TEST_SCHEMA)
+        res = feed_client.feed_batch(documents, self.TEST_SCHEMA)
+        self.assertEqual(2, len(res.responses))
+        for r in res.responses:
+            self.assertEqual(r.status, 500)
+            self.assertIn("Network Error", r.message)
 
+    @pytest.mark.asyncio
     @patch.object(concurrency, "_run_coroutine_in_thread", wraps=concurrency._run_coroutine_in_thread)
     async def test_feed_batch_existingEventLoop_successful(self, mock_executor):
         """Test that feed_batch works when an event loop is already running and runs in a new thread"""
@@ -405,4 +411,82 @@ class TestFeedDocumentAsync(AsyncMarqoTestCase):
         with self.assertRaises(VespaError):
             self.client.deploy_application(os.path.abspath(os.path.curdir))
 
+    def test_feed_batch_documents_DocumentTimeOut_response_format(self):
+        documents = [
+            VespaDocument(id="doc1", fields={"title": "Title 1", "contents": "Content 1"}),
+            VespaDocument(id="doc2", fields={"title": "Title 2"}),
+        ]
 
+        with patch("marqo.vespa.vespa_client.httpx.AsyncClient.post",
+                   side_effect = httpx.TimeoutException("Timeout")):
+            batch_response = self.client.feed_batch(documents, self.TEST_SCHEMA)
+
+        self.assertEqual(batch_response.errors, True)
+        self.assertEqual(2, len(batch_response.responses))
+        for r in batch_response.responses:
+            self.assertEqual(r.status, 500)
+            self.assertIn("Network Error", r.message)
+
+    def test_get_vespa_version(self):
+        expected_vespa_version = '8.431.32'
+        version = self.client.get_vespa_version()
+        self.assertEqual(expected_vespa_version, version)
+
+    def test_translate_vespa_document_response_status(self):
+        test_cases = [
+            (200, 200, None),
+            (404, 404, "Document does not exist in the index"),
+            (412, 404, "Document does not exist in the index"),
+            (429, 429, "Marqo vector store receives too many requests. Please try again later"),
+            (507, 400, "Marqo vector store is out of memory or disk space"),
+            (123, 500, "Marqo vector store returns an unexpected error with this document"),
+            (400, 500, "Marqo vector store returns an unexpected error with this document"),
+            # generic 400 error without specific message
+            (400, 400, "The document contains invalid characters in the fields. Original error: could not parse field"),
+            # specific 400 error
+        ]
+        for status, expected_status, expected_message in test_cases:
+            with self.subTest(status=status):
+                if status == 400 and "could not parse field" in expected_message:
+                    result_status, result_message = self.client.translate_vespa_document_response(
+                        status, "could not parse field")
+                else:
+                    result_status, result_message = self.client.translate_vespa_document_response(
+                        status,None)
+                self.assertEqual(result_status, expected_status)
+                if expected_message:
+                    self.assertIn(expected_message, result_message)
+
+    def test_translate_vespa_document_response_logging(self):
+        with patch("marqo.vespa.vespa_client.logger.error") as mock_log_error:
+            status = 400
+            self.client.translate_vespa_document_response(status, None)
+        mock_log_error.assert_called_once()
+
+    @patch.object(VespaClient, 'get_application_has_converged')
+    def test_vespa_client_timeout_exception_handled(self, mock_get_application_has_converged):
+        """If a timeout exception is raised, the method should retry until the total wait time is reached"""
+        side_effects = [
+            httpx._exceptions.ReadTimeout("Read Timeout"),
+            httpcore._exceptions.ReadTimeout("Read Timeout")
+        ]
+        for side_effect in side_effects:
+            with self.subTest(side_effect=side_effect):
+                mock_get_application_has_converged.side_effect = httpx._exceptions.ReadTimeout("Read Timeout")
+                vespa_client = VespaClient("http://localhost:19071", "http://localhost:8080",
+                                           "http://localhost:8080", "content_default")
+                with self.assertRaises(VespaError) as e:
+                    vespa_client.wait_for_application_convergence(10)
+                self.assertGreaterEqual(mock_get_application_has_converged.call_count, 5)
+                self.assertIn("Vespa application did not converge", str(e.exception))
+
+    @patch.object(VespaClient, 'get_application_has_converged')
+    def test_wait_for_application_timeout(self, mock_get_application_has_converged):
+        """If the total wait time is reached, the method should raise a VespaError"""
+        mock_get_application_has_converged.return_value = False
+        vespa_client = VespaClient("http://localhost:19071", "http://localhost:8080",
+                                   "http://localhost:8080", "content_default")
+
+        with self.assertRaises(VespaError) as e:
+            vespa_client.wait_for_application_convergence(timeout=2)
+        self.assertIn("Vespa application did not converge",str(e.exception))

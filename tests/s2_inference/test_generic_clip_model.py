@@ -2,18 +2,18 @@ import unittest
 
 import numpy as np
 import os
-from marqo.tensor_search.models.add_docs_objects import AddDocsParams
+from marqo.core.models.add_docs_params import AddDocsParams
 from marqo.api.exceptions import IndexNotFoundError
 from marqo.s2_inference.errors import UnknownModelError, ModelLoadError
 from marqo.tensor_search import tensor_search
-from marqo.s2_inference.processing.custom_clip_utils import download_pretrained_from_url
+from marqo.core.inference.model_download import download_pretrained_from_s3
 from marqo.s2_inference.s2_inference import clear_loaded_models
 from marqo.s2_inference.s2_inference import (
     vectorise,
     validate_model_properties
 )
 
-from tests.marqo_test import MarqoTestCase
+from tests.marqo_test import MarqoTestCase, TestImageUrls
 from unittest import mock
 
 @unittest.skip
@@ -72,9 +72,9 @@ class TestGenericModelSupport(MarqoTestCase):
                 "desc 2": "content 2. blah blah blah"
             }]
 
-        tensor_search.add_documents(config=self.config, add_docs_params=AddDocsParams(
+        self.add_documents(config=self.config, add_docs_params=AddDocsParams(
             index_name=self.index_name_1, docs=docs, device="cpu")
-        )
+                           )
 
         # test if we can get the document by _id
         assert tensor_search.get_document_by_id(
@@ -93,7 +93,7 @@ class TestGenericModelSupport(MarqoTestCase):
                 "desc 2": "test again test again test again"
             }]
 
-        tensor_search.add_documents(config=self.config, add_docs_params=AddDocsParams(
+        self.add_documents(config=self.config, add_docs_params=AddDocsParams(
             index_name=self.index_name_1, docs=docs2, device="cpu"))
 
         assert tensor_search.get_document_by_id(
@@ -138,7 +138,7 @@ class TestGenericModelSupport(MarqoTestCase):
                 "desc 2": "content 2. blah blah blah"
             }]
 
-        tensor_search.add_documents(config=self.config, add_docs_params=AddDocsParams(
+        self.add_documents(config=self.config, add_docs_params=AddDocsParams(
             index_name=self.index_name_2, docs=docs, device="cpu"
         ))
 
@@ -157,7 +157,7 @@ class TestGenericModelSupport(MarqoTestCase):
                 "desc 2": "test again test again test again"
             }]
 
-        tensor_search.add_documents(config=self.config, add_docs_params=AddDocsParams(
+        self.add_documents(config=self.config, add_docs_params=AddDocsParams(
             index_name=self.index_name_2, docs=docs2, device="cpu"))
 
         assert tensor_search.get_document_by_id(
@@ -205,7 +205,7 @@ class TestGenericModelSupport(MarqoTestCase):
                 "desc 2": "content 2. blah blah blah"
             }]
 
-        tensor_search.add_documents(config=self.config, add_docs_params=AddDocsParams(
+        self.add_documents(config=self.config, add_docs_params=AddDocsParams(
             index_name=self.index_name_1, docs=docs, device="cpu"))
 
         assert tensor_search.get_document_by_id(
@@ -223,7 +223,7 @@ class TestGenericModelSupport(MarqoTestCase):
                 "desc 2": "test again test again test again"
             }]
 
-        tensor_search.add_documents(config=self.config, add_docs_params=AddDocsParams(
+        self.add_documents(config=self.config, add_docs_params=AddDocsParams(
             index_name=self.index_name_1, docs=docs2, device="cpu"))
 
         assert tensor_search.get_document_by_id(
@@ -323,10 +323,10 @@ class TestGenericModelSupport(MarqoTestCase):
                 "_id": "123",
                 "title 1": "content 1",
                 "desc 2": "content 2. blah blah blah",
-                "image" : "https://raw.githubusercontent.com/marqo-ai/marqo-clip-onnx/main/examples/coco.jpg"
+                "image" : TestImageUrls.COCO.value
             }]
 
-        tensor_search.add_documents(config=config, add_docs_params=AddDocsParams(
+        self.add_documents(config=config, add_docs_params=AddDocsParams(
             index_name=index_name, docs=docs, device="cpu"))
 
 
@@ -371,7 +371,7 @@ class TestGenericModelSupport(MarqoTestCase):
 
         epsilon = 1e-7
 
-        image = "https://raw.githubusercontent.com/marqo-ai/marqo-clip-onnx/main/examples/coco.jpg"
+        image = TestImageUrls.COCO.value
 
         model_name = "test-model"
         model_properties = {
@@ -410,7 +410,7 @@ class TestGenericModelSupport(MarqoTestCase):
 
         epsilon = 1e-7
 
-        image = "https://raw.githubusercontent.com/marqo-ai/marqo-clip-onnx/main/examples/coco.jpg"
+        image = TestImageUrls.COCO.value
 
         model_name = "test-model"
         model_properties = {

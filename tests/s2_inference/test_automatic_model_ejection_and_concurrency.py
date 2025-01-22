@@ -1,5 +1,6 @@
 import unittest
 import unittest.mock
+import pytest
 from unittest.mock import patch
 from marqo.api.exceptions import ModelCacheManagementError
 from marqo.tensor_search import tensor_search
@@ -39,6 +40,7 @@ class TestAutomaticModelEject(unittest.TestCase):
         small_list_of_models = ['open_clip/convnext_base_w_320/laion_aesthetic_s13b_b82k',
                                 "sentence-transformers/all-MiniLM-L6-v2",
                                 "flax-sentence-embeddings/all_datasets_v4_mpnet-base",
+                                'Marqo/ViT-B-16.laion2b_s34b_b88k',
                                 'open_clip/ViT-B-16/laion2b_s34b_b88k']
         content = "Try to kill the cpu"
 
@@ -55,6 +57,7 @@ class TestAutomaticModelEject(unittest.TestCase):
         small_list_of_models = ['open_clip/convnext_base_w_320/laion_aesthetic_s13b_b82k',
                                 "sentence-transformers/all-MiniLM-L6-v2",
                                 "flax-sentence-embeddings/all_datasets_v4_mpnet-base",
+                                'Marqo/ViT-B-16.laion2b_s34b_b88k',
                                 'open_clip/ViT-B-16/laion2b_s34b_b88k']
 
         content = "Try to kill the cpu"
@@ -69,6 +72,7 @@ class TestAutomaticModelEject(unittest.TestCase):
         self.assertEqual(len(checked_devices), len(small_list_of_models))
         self.assertEqual(set(checked_devices), {"cpu"})
 
+    @pytest.mark.skip(reason="skipping since we have increased max model size to 15 GB")
     def test_load_very_large_model(self):
         huge_models = ['open_clip/ViT-g-14/laion2b_s12b_b42k']
         for model in huge_models:

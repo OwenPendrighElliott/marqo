@@ -6,11 +6,11 @@ https://pydantic-docs.helpmanual.io/usage/types/#enums-and-choices
 
 from typing import Union, List, Dict, Optional
 
-import pydantic
-from pydantic import BaseModel, root_validator, validator
+from pydantic import v1 as pydantic
+from pydantic.v1 import BaseModel, root_validator, validator, Field
 
 from marqo.base_model import ImmutableStrictBaseModel
-from marqo.core.models.hybrid_parameters import HybridParameters
+from marqo.core.models.hybrid_parameters import HybridParameters, RetrievalMethod, RankingMethod
 from marqo.core.models.marqo_index import MarqoIndex
 from marqo.tensor_search import validation
 from marqo.tensor_search.enums import SearchMethod
@@ -40,6 +40,7 @@ class SearchQuery(BaseMarqoModel):
     searchMethod: SearchMethod = SearchMethod.TENSOR
     limit: int = 10
     offset: int = 0
+    rerankDepth: Optional[int] = None
     efSearch: Optional[int] = None
     approximate: Optional[bool] = None
     showHighlights: bool = True
@@ -47,7 +48,8 @@ class SearchQuery(BaseMarqoModel):
     filter: str = None
     attributesToRetrieve: Union[None, List[str]] = None
     boost: Optional[Dict] = None
-    image_download_headers: Optional[Dict] = None
+    imageDownloadHeaders: Optional[Dict] = Field(default_factory=None, alias="image_download_headers")
+    mediaDownloadHeaders: Optional[Dict] = None
     context: Optional[SearchContext] = None
     scoreModifiers: Optional[ScoreModifierLists] = None
     modelAuth: Optional[ModelAuth] = None
@@ -67,6 +69,26 @@ class SearchQuery(BaseMarqoModel):
             return value.upper()
         else:
             return value
+
+    @root_validator(skip_on_failure=True)
+    def _validate_image_download_headers_and_media_download_headers(cls, values):
+        """Validate imageDownloadHeaders and mediaDownloadHeaders. Raise an error if both are set.
+
+        If imageDownloadHeaders is set, set mediaDownloadHeaders to it and use mediaDownloadHeaders in the
+        rest of the code.
+
+        imageDownloadHeaders is deprecated and will be removed in the future.
+        """
+        image_download_headers = values.get('imageDownloadHeaders')
+        media_download_headers = values.get('mediaDownloadHeaders')
+        if image_download_headers and media_download_headers:
+            raise ValueError("Cannot set both imageDownloadHeaders(image_download_headers) and mediaDownloadHeaders. "
+                             "'imageDownloadHeaders'(image_download_headers) is deprecated and will be removed in the future. "
+                             "Use mediaDownloadHeaders instead.")
+        if image_download_headers:
+            values['mediaDownloadHeaders'] = image_download_headers
+        return values
+
 
     @root_validator(pre=False, skip_on_failure=True)
     def validate_query_and_context(cls, values):
@@ -98,6 +120,23 @@ class SearchQuery(BaseMarqoModel):
         if hybrid_parameters is not None and search_method.upper() != SearchMethod.HYBRID:
             raise ValueError(f"Hybrid parameters can only be provided for 'HYBRID' search. "
                              f"Search method is {search_method}.")
+        return values
+
+    @root_validator(pre=False)
+    def validate_rerank_depth(cls, values):
+        """Validate that rerank_depth is only set for hybrid search - RRF. """
+        hybrid_parameters = values.get('hybridParameters')
+        search_method = values.get('searchMethod')
+        rerank_depth = values.get('rerankDepth')
+
+        if rerank_depth is not None:
+            if search_method.upper() != SearchMethod.HYBRID:
+                raise ValueError(f"'rerankDepth' is currently only supported for 'HYBRID' search method.")
+            if hybrid_parameters is not None and hybrid_parameters.rankingMethod != RankingMethod.RRF:
+                raise ValueError(f"'rerankDepth' is currently only supported for 'HYBRID' search with the 'RRF' rankingMethod.")
+            if rerank_depth < 0:
+                raise ValueError(f"rerankDepth cannot be negative.")
+
         return values
 
     @pydantic.validator('searchMethod')

@@ -1,11 +1,10 @@
 import textwrap
-import semver
 
 from marqo.core import constants
 from marqo.core.models import UnstructuredMarqoIndex
 from marqo.core.models.marqo_index_request import UnstructuredMarqoIndexRequest
 from marqo.core.unstructured_vespa_index import common as unstructured_common
-from marqo.core.vespa_schema import VespaSchema
+from marqo.core.vespa_index.vespa_schema import VespaSchema
 
 
 class UnstructuredVespaSchema(VespaSchema):
@@ -54,6 +53,8 @@ class UnstructuredVespaSchema(VespaSchema):
             normalize_embeddings=self._index_request.normalize_embeddings,
             text_preprocessing=self._index_request.text_preprocessing,
             image_preprocessing=self._index_request.image_preprocessing,
+            video_preprocessing=self._index_request.video_preprocessing,
+            audio_preprocessing=self._index_request.audio_preprocessing,
             distance_metric=self._index_request.distance_metric,
             vector_numeric_type=self._index_request.vector_numeric_type,
             hnsw_config=self._index_request.hnsw_config,
@@ -61,6 +62,7 @@ class UnstructuredVespaSchema(VespaSchema):
             created_at=self._index_request.created_at,
             updated_at=self._index_request.updated_at,
             treat_urls_and_pointers_as_images=self._index_request.treat_urls_and_pointers_as_images,
+            treat_urls_and_pointers_as_media=self._index_request.treat_urls_and_pointers_as_media,
             filter_string_max_length=self._index_request.filter_string_max_length,
         )
 

@@ -1,17 +1,19 @@
+from enum import Enum
 from timeit import default_timer as timer
 from typing import List, Optional, Union, Dict
-from enum import Enum
 
-import pydantic
+from pydantic import v1 as pydantic
 
+import marqo.api.exceptions as api_exceptions
+import marqo.s2_inference.errors as s2_inference_errors
 from marqo import exceptions as base_exceptions
 from marqo.core.index_management.index_management import IndexManagement
+from marqo.tensor_search import utils
 from marqo.tensor_search.models.api_models import BulkSearchQueryEntity
 from marqo.tensor_search.models.private_models import ModelAuth
 from marqo.tensor_search.models.search import Qidx
 from marqo.tensor_search.telemetry import RequestMetricsStore
 from marqo.tensor_search.tensor_search_logging import get_logger
-from marqo.core.utils.prefix import determine_text_prefix, DeterminePrefixContentType
 from marqo.vespa.vespa_client import VespaClient
 
 logger = get_logger(__name__)
@@ -27,17 +29,19 @@ class Embed:
         self.default_device = default_device
 
     @pydantic.validator('default_device')
+    # TODO [Refactoring device logic] deprecate default_device since it's not used
     def validate_default_device(cls, value):
         if not value:
             raise ValueError("Default Device cannot be 'None'. Marqo default device must have been declared upon startup.")
         return value
 
     def embed_content(
-                    self, content: Union[str, Dict[str, float], List[Union[str, Dict[str, float]]]],
-                    index_name: str, device: str = None, image_download_headers: Optional[Dict] = None,
-                    model_auth: Optional[ModelAuth] = None,
-                    content_type: Optional[EmbedContentType] = EmbedContentType.Query
-                    ) -> Dict:
+            self, content: Union[str, Dict[str, float], List[Union[str, Dict[str, float]]]],
+            index_name: str, device: str = None,
+            media_download_headers: Optional[Dict] = None,
+            model_auth: Optional[ModelAuth] = None,
+            content_type: Optional[EmbedContentType] = EmbedContentType.Query
+    ) -> Dict:
         """
         Use the index's model to embed the content
 
@@ -61,18 +65,18 @@ class Embed:
         temp_config = config.Config(
             vespa_client=self.vespa_client,
         )
-
+        
         # Set default device if not provided
+        # TODO [Refactoring device logic] use device info gathered from device manager
         if device is None:
-            device = self.default_device
-
+            device = utils.read_env_vars_and_defaults("MARQO_BEST_AVAILABLE_DEVICE")
 
         # Content validation is done in API model layer
         t0 = timer()
 
         # Generate input for the vectorise pipeline (Preprocessing)
         RequestMetricsStore.for_request().start("embed.query_preprocessing")
-        marqo_index = index_meta_cache.get_index(config=temp_config, index_name=index_name)
+        marqo_index = index_meta_cache.get_index(index_management=temp_config.index_management, index_name=index_name)
 
         # Transform content to list if it is not already
         if isinstance(content, List):
@@ -105,7 +109,7 @@ class Embed:
                 BulkSearchQueryEntity(
                     q=content_entry,
                     index=marqo_index,
-                    image_download_headers=image_download_headers,
+                    mediaDownloadHeaders=media_download_headers,
                     modelAuth=model_auth,
                     text_query_prefix=prefix
                     # TODO: Check if it's fine that we leave out the other parameters
@@ -115,7 +119,9 @@ class Embed:
 
         # Vectorise the queries
         with RequestMetricsStore.for_request().time(f"embed.vector_inference_full_pipeline"):
-            qidx_to_vectors: Dict[Qidx, List[float]] = tensor_search.run_vectorise_pipeline(temp_config, queries, device)
+            qidx_to_vectors: Dict[Qidx, List[float]] = tensor_search.run_vectorise_pipeline(
+                temp_config, queries, device
+            )
 
         embeddings: List[List[float]] = list(qidx_to_vectors.values())
 

@@ -1,19 +1,64 @@
+import contextlib
+import socket
+import threading
 import time
 import unittest
 import uuid
+from typing import Generator
 from unittest.mock import patch, Mock
 
+import uvicorn
 import vespa.application as pyvespa
+from starlette.applications import Starlette
 
-from marqo import config, version
-from marqo.vespa.zookeeper_client import ZookeeperClient
+from marqo import config, version, tensor_search
 from marqo.core.index_management.index_management import IndexManagement
 from marqo.core.models.marqo_index import *
 from marqo.core.models.marqo_index_request import (StructuredMarqoIndexRequest, UnstructuredMarqoIndexRequest,
                                                    FieldRequest, MarqoIndexRequest)
 from marqo.core.monitoring.monitoring import Monitoring
+from marqo.tensor_search import tensor_search
 from marqo.tensor_search.telemetry import RequestMetricsStore
 from marqo.vespa.vespa_client import VespaClient
+from marqo.vespa.zookeeper_client import ZookeeperClient
+
+
+class TestImageUrls(str, Enum):
+    __test__ = False  # Prevent pytest from collecting this class as a test
+    IMAGE0 = 'https://raw.githubusercontent.com/marqo-ai/marqo/mainline/examples/ImageSearchGuide/data/image0.jpg'
+    IMAGE1 = 'https://raw.githubusercontent.com/marqo-ai/marqo/mainline/examples/ImageSearchGuide/data/image1.jpg'
+    IMAGE2 = 'https://raw.githubusercontent.com/marqo-ai/marqo/mainline/examples/ImageSearchGuide/data/image2.jpg'
+    IMAGE3 = 'https://raw.githubusercontent.com/marqo-ai/marqo/mainline/examples/ImageSearchGuide/data/image3.jpg'
+    IMAGE4 = 'https://raw.githubusercontent.com/marqo-ai/marqo/mainline/examples/ImageSearchGuide/data/image4.jpg'
+    COCO = 'https://raw.githubusercontent.com/marqo-ai/marqo-clip-onnx/main/examples/coco.jpg'
+    HIPPO_REALISTIC = 'https://raw.githubusercontent.com/marqo-ai/marqo-api-tests/mainline/assets/ai_hippo_realistic_small.png'
+    HIPPO_REALISTIC_LARGE = 'https://raw.githubusercontent.com/marqo-ai/marqo-api-tests/mainline/assets/ai_hippo_realistic.png'
+    HIPPO_STATUE = 'https://raw.githubusercontent.com/marqo-ai/marqo-api-tests/mainline/assets/ai_hippo_statue_small.png'
+
+
+class TestAudioUrls(str, Enum):
+    __test__ = False
+    AUDIO1 = "https://marqo-ecs-50-audio-test-dataset.s3.us-east-1.amazonaws.com/audios/1-100032-A-0.wav"
+    AUDIO2 = "https://marqo-ecs-50-audio-test-dataset.s3.us-east-1.amazonaws.com/audios/1-115545-C-48.wav"
+    AUDIO3 = "https://marqo-ecs-50-audio-test-dataset.s3.us-east-1.amazonaws.com/audios/1-119125-A-45.wav"
+
+    MP3_AUDIO1 = "https://opensource-languagebind-models.s3.us-east-1.amazonaws.com/test-media-types/sample3.mp3"
+    ACC_AUDIO1 = "https://opensource-languagebind-models.s3.us-east-1.amazonaws.com/test-media-types/sample3.aac"
+    OGG_AUDIO1 = "https://opensource-languagebind-models.s3.us-east-1.amazonaws.com/test-media-types/sample3.ogg"
+
+    FLAC_AUDIO1 = "https://opensource-languagebind-models.s3.us-east-1.amazonaws.com/test-media-types/sample3.flac"
+
+
+class TestVideoUrls(str, Enum):
+    __test__ = False
+    VIDEO1 = "https://marqo-k400-video-test-dataset.s3.us-east-1.amazonaws.com/videos/--_S9IDQPLg_000135_000145.mp4"
+    VIDEO2 = "https://marqo-k400-video-test-dataset.s3.us-east-1.amazonaws.com/videos/---QUuC4vJs_000084_000094.mp4"
+    VIDEO3 = "https://marqo-k400-video-test-dataset.s3.us-east-1.amazonaws.com/videos/--mI_-gaZLk_000018_000028.mp4"
+
+    MKV_VIDEO1 = "https://opensource-languagebind-models.s3.us-east-1.amazonaws.com/test-media-types/sample_640x360.mkv"
+    WEBM_VIDEO1 = "https://opensource-languagebind-models.s3.us-east-1.amazonaws.com/test-media-types/sample_640x360.webm"
+    AVI_VIDEO1 = "https://opensource-languagebind-models.s3.us-east-1.amazonaws.com/test-media-types/sample_640x360.avi"
+
 
 
 class MarqoTestCase(unittest.TestCase):
@@ -33,7 +78,7 @@ class MarqoTestCase(unittest.TestCase):
     def tearDownClass(cls):
         cls.patcher.stop()
         if cls.indexes:
-            cls.index_management.batch_delete_indexes(cls.indexes)
+            cls.index_management.batch_delete_indexes_by_name([index.name for index in cls.indexes])
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -47,7 +92,8 @@ class MarqoTestCase(unittest.TestCase):
         cls.configure_request_metrics()
         cls.vespa_client = vespa_client
         cls.zookeeper_client = zookeeper_client
-        cls.index_management = IndexManagement(cls.vespa_client, cls.zookeeper_client, enable_index_operations=True)
+        cls.index_management = IndexManagement(cls.vespa_client, cls.zookeeper_client, enable_index_operations=True,
+                                               deployment_lock_timeout_seconds=2)
         cls.monitoring = Monitoring(cls.vespa_client, cls.index_management)
         cls.config = config.Config(vespa_client=vespa_client, default_device="cpu",
                                    zookeeper_client=cls.zookeeper_client)
@@ -57,20 +103,40 @@ class MarqoTestCase(unittest.TestCase):
 
     @classmethod
     def create_indexes(cls, index_requests: List[MarqoIndexRequest]) -> List[MarqoIndex]:
+        cls.index_management.bootstrap_vespa()
         indexes = cls.index_management.batch_create_indexes(index_requests)
         cls.indexes = indexes
 
         return indexes
+
+    @classmethod
+    def add_documents(cls, *args, **kwargs):
+        # TODO change to use config.document.add_documents when tensor_search.add_documents is removed
+        return tensor_search.add_documents(*args, **kwargs)
 
     def setUp(self) -> None:
         self.clear_indexes(self.indexes)
 
     def clear_indexes(self, indexes: List[MarqoIndex]):
         for index in indexes:
-            self.clear_index_by_name(index.schema_name)
+            self.clear_index_by_schema_name(index.schema_name)
 
-    def clear_index_by_name(self, index_name: str):
-        self.pyvespa_client.delete_all_docs(self.CONTENT_CLUSTER, index_name)
+    def clear_index_by_index_name(self, index_name: str):
+        """Delete all documents in the given index.
+
+        Args:
+            index_name: The name of the index to clear.
+        """
+        schema_name = self.index_management.get_index(index_name).schema_name
+        return self.clear_index_by_schema_name(schema_name)
+
+    def clear_index_by_schema_name(self, schema_name: str):
+        """Delete all documents in the given index.
+
+        Args:
+            schema_name: The schema name of the index to clear. It is not the same as the index name.
+        """
+        self.pyvespa_client.delete_all_docs(self.CONTENT_CLUSTER, schema_name)
 
     def random_index_name(self) -> str:
         return 'a' + str(uuid.uuid4()).replace('-', '')
@@ -92,6 +158,14 @@ class MarqoTestCase(unittest.TestCase):
             image_preprocessing: ImagePreProcessing = ImagePreProcessing(
                 patch_method=None
             ),
+            video_preprocessing: VideoPreProcessing = VideoPreProcessing(
+                split_length=20,
+                split_overlap=1,
+            ),
+            audio_preprocessing: AudioPreProcessing = AudioPreProcessing(
+                split_length=20,
+                split_overlap=1,
+            ),
             distance_metric: DistanceMetric = DistanceMetric.Angular,
             vector_numeric_type: VectorNumericType = VectorNumericType.Float,
             hnsw_config: HnswConfig = HnswConfig(
@@ -100,7 +174,8 @@ class MarqoTestCase(unittest.TestCase):
             ),
             marqo_version=version.get_version(),
             created_at=time.time(),
-            updated_at=time.time()
+            updated_at=time.time(),
+            version=None
     ) -> StructuredMarqoIndex:
         """
         Helper method that provides reasonable defaults for StructuredMarqoIndex.
@@ -112,6 +187,8 @@ class MarqoTestCase(unittest.TestCase):
             normalize_embeddings=normalize_embeddings,
             text_preprocessing=text_preprocessing,
             image_preprocessing=image_preprocessing,
+            video_preprocessing=video_preprocessing,
+            audio_preprocessing=audio_preprocessing,
             distance_metric=distance_metric,
             vector_numeric_type=vector_numeric_type,
             hnsw_config=hnsw_config,
@@ -119,7 +196,8 @@ class MarqoTestCase(unittest.TestCase):
             tensor_fields=tensor_fields,
             marqo_version=marqo_version,
             created_at=created_at,
-            updated_at=updated_at
+            updated_at=updated_at,
+            version=version
         )
 
     @classmethod
@@ -127,8 +205,6 @@ class MarqoTestCase(unittest.TestCase):
             cls,
             name: str,
             schema_name: str,
-            fields: List[Field] = None,
-            tensor_fields: List[TensorField] = None,
             model: Model = Model(name='hf/all_datasets_v4_MiniLM-L6'),
             normalize_embeddings: bool = True,
             text_preprocessing: TextPreProcessing = TextPreProcessing(
@@ -138,6 +214,14 @@ class MarqoTestCase(unittest.TestCase):
             ),
             image_preprocessing: ImagePreProcessing = ImagePreProcessing(
                 patch_method=None
+            ),
+            video_preprocessing: VideoPreProcessing = VideoPreProcessing(
+                split_length=20,
+                split_overlap=1,
+            ),
+            audio_preprocessing: AudioPreProcessing = AudioPreProcessing(
+                split_length=20,
+                split_overlap=1,
             ),
             distance_metric: DistanceMetric = DistanceMetric.Angular,
             vector_numeric_type: VectorNumericType = VectorNumericType.Float,
@@ -149,7 +233,9 @@ class MarqoTestCase(unittest.TestCase):
             created_at=time.time(),
             updated_at=time.time(),
             treat_urls_and_pointers_as_images=True,
-            filter_string_max_length=100
+            treat_urls_and_pointers_as_media=True,
+            filter_string_max_length=100,
+            version=None
     ) -> UnstructuredMarqoIndex:
         """
         Helper method that provides reasonable defaults for UnstructuredMarqoIndex.
@@ -161,16 +247,18 @@ class MarqoTestCase(unittest.TestCase):
             normalize_embeddings=normalize_embeddings,
             text_preprocessing=text_preprocessing,
             image_preprocessing=image_preprocessing,
+            video_preprocessing=video_preprocessing,
+            audio_preprocessing=audio_preprocessing,
             distance_metric=distance_metric,
             vector_numeric_type=vector_numeric_type,
             hnsw_config=hnsw_config,
-            fields=fields,
-            tensor_fields=tensor_fields,
             marqo_version=marqo_version,
             created_at=created_at,
             updated_at=updated_at,
             treat_urls_and_pointers_as_images=treat_urls_and_pointers_as_images,
-            filter_string_max_length=filter_string_max_length
+            treat_urls_and_pointers_as_media=treat_urls_and_pointers_as_media,
+            filter_string_max_length=filter_string_max_length,
+            version=version
         )
 
     @classmethod
@@ -192,6 +280,14 @@ class MarqoTestCase(unittest.TestCase):
             ),
             image_preprocessing: ImagePreProcessing = ImagePreProcessing(
                 patch_method=None
+            ),
+            video_preprocessing: VideoPreProcessing = VideoPreProcessing(
+                split_length=20,
+                split_overlap=1,
+            ),
+            audio_preprocessing: AudioPreProcessing = AudioPreProcessing(
+                split_length=20,
+                split_overlap=1,
             ),
             distance_metric: DistanceMetric = DistanceMetric.Angular,
             vector_numeric_type: VectorNumericType = VectorNumericType.Float,
@@ -215,6 +311,8 @@ class MarqoTestCase(unittest.TestCase):
             normalize_embeddings=normalize_embeddings,
             text_preprocessing=text_preprocessing,
             image_preprocessing=image_preprocessing,
+            video_preprocessing=video_preprocessing,
+            audio_preprocessing=audio_preprocessing,
             distance_metric=distance_metric,
             vector_numeric_type=vector_numeric_type,
             hnsw_config=hnsw_config,
@@ -243,6 +341,14 @@ class MarqoTestCase(unittest.TestCase):
             image_preprocessing: ImagePreProcessing = ImagePreProcessing(
                 patch_method=None
             ),
+            video_preprocessing: VideoPreProcessing = VideoPreProcessing(
+                split_length=20,
+                split_overlap=1,
+            ),
+            audio_preprocessing: AudioPreProcessing = AudioPreProcessing(
+                split_length=20,
+                split_overlap=1,
+            ),
             distance_metric: DistanceMetric = DistanceMetric.Angular,
             vector_numeric_type: VectorNumericType = VectorNumericType.Float,
             hnsw_config: HnswConfig = HnswConfig(
@@ -250,6 +356,7 @@ class MarqoTestCase(unittest.TestCase):
                 m=16
             ),
             treat_urls_and_pointers_as_images: bool = False,
+            treat_urls_and_pointers_as_media: bool = False,
             filter_string_max_length: int = 50,
             marqo_version=version.get_version(),
             created_at=time.time(),
@@ -266,10 +373,13 @@ class MarqoTestCase(unittest.TestCase):
             name=name,
             model=model,
             treat_urls_and_pointers_as_images=treat_urls_and_pointers_as_images,
+            treat_urls_and_pointers_as_media=treat_urls_and_pointers_as_media,
             filter_string_max_length=filter_string_max_length,
             normalize_embeddings=normalize_embeddings,
             text_preprocessing=text_preprocessing,
             image_preprocessing=image_preprocessing,
+            video_preprocessing=video_preprocessing,
+            audio_preprocessing=audio_preprocessing,
             distance_metric=distance_metric,
             vector_numeric_type=vector_numeric_type,
             hnsw_config=hnsw_config,
@@ -307,3 +417,38 @@ class MarqoTestCase(unittest.TestCase):
 
 class AsyncMarqoTestCase(unittest.IsolatedAsyncioTestCase, MarqoTestCase):
     pass
+
+
+class MockHttpServer:
+    """
+    A MockHttpServer that takes a Starlette app as input, start the uvicorn server
+    in a thread, and yield the server url (with random port binding). After the test,
+    it automatically shuts down the server.
+
+    This can be used in individual tests, or as a test fixture in class or module scope.
+    Example usage:
+
+    app = Starlette(routes=[
+        Route('/path1', lambda _: Response({"a":"b"}, status_code=200)),
+        Route('/image.jpg', lambda _: Response(b'\x00\x00\x00\xff', media_type='image/png')),
+    ])
+
+    with MockHttpServer(app).run_in_thread() as base_url:
+        run_some_tests
+    """
+    def __init__(self, app: Starlette):
+        self.server = uvicorn.Server(config=uvicorn.Config(app=app))
+
+    @contextlib.contextmanager
+    def run_in_thread(self) -> Generator[str, None, None]:
+        (sock := socket.socket()).bind(("127.0.0.1", 0))
+        thread = threading.Thread(target=self.server.run, kwargs={"sockets": [sock]})
+        thread.start()
+        try:
+            while not self.server.started:
+                time.sleep(1)
+            address, port = sock.getsockname()
+            yield f'http://{address}:{port}'
+        finally:
+            self.server.should_exit = True
+            thread.join()

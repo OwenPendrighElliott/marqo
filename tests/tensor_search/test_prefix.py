@@ -11,16 +11,17 @@ from marqo.api.models.embed_request import EmbedRequest
 from marqo.tensor_search import enums
 from marqo.tensor_search import tensor_search
 from marqo.tensor_search.api import embed
-from marqo.tensor_search.models.add_docs_objects import AddDocsParams
+from marqo.core.models.add_docs_params import AddDocsParams
 from marqo.tensor_search.models.api_models import BulkSearchQueryEntity
 from marqo.core.models.marqo_index import StructuredMarqoIndex, FieldFeature, FieldType, Model
 from marqo.core.models.marqo_index import FieldType, UnstructuredMarqoIndex, TextPreProcessing, \
-    ImagePreProcessing, Model, DistanceMetric, VectorNumericType, HnswConfig, TextSplitMethod, IndexType
+    ImagePreProcessing, VideoPreProcessing, AudioPreProcessing, Model, DistanceMetric, VectorNumericType, \
+    HnswConfig, TextSplitMethod, IndexType
 from marqo.core.models.marqo_index_request import (StructuredMarqoIndexRequest, UnstructuredMarqoIndexRequest,
                                                    FieldRequest, MarqoIndexRequest)
 
 from marqo.s2_inference import s2_inference
-from tests.marqo_test import MarqoTestCase
+from tests.marqo_test import MarqoTestCase, TestImageUrls
 
 
 def pass_through_vectorise(*args, **kwargs):
@@ -128,21 +129,21 @@ class TestPrefix(MarqoTestCase):
         for index in [self.unstructured_index_1, self.structured_text_index]:
             with self.subTest(index=index.type):
                 # A) Add normal text document (1 chunk)
-                tensor_search.add_documents(config=self.config, add_docs_params=AddDocsParams(
+                self.add_documents(config=self.config, add_docs_params=AddDocsParams(
                     index_name=index.name, docs=[{"_id": "doc_a", "text": "hello"}], auto_refresh=True,
                     device=self.config.default_device,
                     tensor_fields=["text"] if isinstance(index, UnstructuredMarqoIndex) else None
                 ))
 
                 # B) Add same text document but WITH PREFIX (1 chunk)
-                tensor_search.add_documents(config=self.config, add_docs_params=AddDocsParams(
+                self.add_documents(config=self.config, add_docs_params=AddDocsParams(
                     index_name=index.name, docs=[{"_id": "doc_b", "text": "hello"}], auto_refresh=True,
                     device=self.config.default_device, text_chunk_prefix="PREFIX: ",
                     tensor_fields=["text"] if isinstance(index, UnstructuredMarqoIndex) else None
                 ))
 
                 # C) Add document with prefix built into text itself (1 chunk)
-                tensor_search.add_documents(config=self.config, add_docs_params=AddDocsParams(
+                self.add_documents(config=self.config, add_docs_params=AddDocsParams(
                     index_name=index.name, docs=[{"_id": "doc_c", "text": "PREFIX: hello"}], auto_refresh=True,
                     device=self.config.default_device,
                     tensor_fields=["text"] if isinstance(index, UnstructuredMarqoIndex) else None
@@ -152,7 +153,7 @@ class TestPrefix(MarqoTestCase):
                 res = tensor_search.get_documents_by_ids(
                     config=self.config, index_name=index.name, document_ids=["doc_a", "doc_b", "doc_c"],
                     show_vectors=True
-                )["results"]
+                ).dict(exclude_none=True, by_alias=True)["results"]
                 retrieved_doc_a = res[0]
                 retrieved_doc_b = res[1]
                 retrieved_doc_c = res[2]
@@ -188,21 +189,21 @@ class TestPrefix(MarqoTestCase):
         for index in [self.unstructured_index_e5]:
             with self.subTest(index=index.type):
                 # A) prefix should default to "passage: " with the e5-small model
-                tensor_search.add_documents(config=self.config, add_docs_params=AddDocsParams(
+                self.add_documents(config=self.config, add_docs_params=AddDocsParams(
                     index_name=index.name, docs=[{"_id": "doc_a", "text": "hello"}], auto_refresh=True,
                     device=self.config.default_device,
                     tensor_fields=["text"] if isinstance(index, UnstructuredMarqoIndex) else None
                 ))
 
                 # B) manually set prefix at the request level
-                tensor_search.add_documents(config=self.config, add_docs_params=AddDocsParams(
+                self.add_documents(config=self.config, add_docs_params=AddDocsParams(
                     index_name=index.name, docs=[{"_id": "doc_b", "text": "hello"}], auto_refresh=True,
                     device=self.config.default_device, text_chunk_prefix="passage: ",
                     tensor_fields=["text"] if isinstance(index, UnstructuredMarqoIndex) else None
                 ))
 
                 # C) Set no prefix 
-                tensor_search.add_documents(config=self.config, add_docs_params=AddDocsParams(
+                self.add_documents(config=self.config, add_docs_params=AddDocsParams(
                     index_name=index.name, docs=[{"_id": "doc_c", "text": "hello"}], auto_refresh=True,
                     device=self.config.default_device, text_chunk_prefix="custom_prefix: ",
                     tensor_fields=["text"] if isinstance(index, UnstructuredMarqoIndex) else None
@@ -212,7 +213,7 @@ class TestPrefix(MarqoTestCase):
                 res = tensor_search.get_documents_by_ids(
                     config=self.config, index_name=index.name, document_ids=["doc_a", "doc_b", "doc_c"],
                     show_vectors=True
-                )["results"]
+                ).dict(exclude_none=True, by_alias=True)["results"]
                 retrieved_doc_a = res[0]
                 retrieved_doc_b = res[1]
                 retrieved_doc_c = res[2]
@@ -251,14 +252,14 @@ class TestPrefix(MarqoTestCase):
         for index in [self.unstructured_index_multimodal]:
             with self.subTest(index=index.type):
                 # Add a multimodal doc with a text and image field
-                tensor_search.add_documents(
+                self.add_documents(
                     config=self.config,
                     add_docs_params=AddDocsParams(
                         index_name=index.name,
                         docs=[{
                             "Title": "Horse rider",
                             "text_field": "hello",
-                            "image_field": "https://marqo-assets.s3.amazonaws.com/tests/images/image1.jpg",
+                            "image_field": TestImageUrls.IMAGE1.value,
                             "_id": "1"
                         }],
                         device="cpu",
@@ -273,20 +274,20 @@ class TestPrefix(MarqoTestCase):
                     )
                 )
 
-                tensor_search.add_documents(
+                self.add_documents(
                     config=self.config,
                     add_docs_params=AddDocsParams(
                         index_name=index.name,
                         docs=[{
                             "Title": "Horse rider",
                             "text_field": "passage: hello",
-                            "image_field": "https://marqo-assets.s3.amazonaws.com/tests/images/image1.jpg",
+                            "image_field": TestImageUrls.IMAGE1.value,
                             "_id": "2"
                         },
                         {
                             "Title": "Horse rider",
                             "text_field": "passage: passage: hello",
-                            "image_field": "https://marqo-assets.s3.amazonaws.com/tests/images/image1.jpg",
+                            "image_field": TestImageUrls.IMAGE1.value,
                             "_id": "3"
                         }],
                         device="cpu",
@@ -305,7 +306,7 @@ class TestPrefix(MarqoTestCase):
                 res = tensor_search.get_documents_by_ids(
                     config=self.config, index_name=index.name, document_ids=["1", "2", "3"],
                     show_vectors=True
-                )
+                ).dict(exclude_none=True, by_alias=True)
                 
                 # Assert that the text field remains the same stored
                 self.assertEqual(res["results"][0]["text_field"], "hello")
@@ -331,14 +332,14 @@ class TestPrefix(MarqoTestCase):
                 # Dict query (text has prefix, image does not)
                 queries = [BulkSearchQueryEntity(
                     q={"text query": 0.5,
-                       "https://marqo-assets.s3.amazonaws.com/tests/images/ai_hippo_realistic.png": 0.5},
+                       TestImageUrls.HIPPO_REALISTIC.value: 0.5},
                     text_query_prefix="PREFIX: ",
                     index=index
                 )]
 
                 prefixed_queries = tensor_search.add_prefix_to_queries(queries)
                 self.assertEqual(prefixed_queries[0].q, {"PREFIX: text query": 0.5,
-                                                         "https://marqo-assets.s3.amazonaws.com/tests/images/ai_hippo_realistic.png": 0.5})
+                                                         TestImageUrls.HIPPO_REALISTIC.value: 0.5})
 
     def test_determine_text_chunk_prefix(self):
         """
@@ -363,7 +364,7 @@ class TestPrefix(MarqoTestCase):
             self.assertEqual(result, "test passage: ")
 
         # doc_a should default to the override prefix
-        tensor_search.add_documents(config=self.config, add_docs_params=AddDocsParams(
+        self.add_documents(config=self.config, add_docs_params=AddDocsParams(
             index_name=self.unstructured_index_with_override.name, docs=[{"_id": "doc_a", "text": "hello"}], auto_refresh=True,
             device=self.config.default_device,
             tensor_fields=["text"] if isinstance(self.unstructured_index_with_override, UnstructuredMarqoIndex) else None
@@ -373,7 +374,7 @@ class TestPrefix(MarqoTestCase):
         res = tensor_search.get_documents_by_ids(
             config=self.config, index_name=self.unstructured_index_with_override.name, document_ids=["doc_a"],
             show_vectors=True
-        )
+        ).dict(exclude_none=True, by_alias=True)
 
         # we hardcode the prefix into the text chunk and embed
         embed_res = embed(
@@ -451,6 +452,7 @@ class TestPrefix(MarqoTestCase):
             ),
             normalize_embeddings=True,
             treat_urls_and_pointers_as_images=True,
+            treat_urls_and_pointers_as_media=False,
             filter_string_max_length=1000,
             text_preprocessing=TextPreProcessing(
                 splitLength=6,
@@ -458,6 +460,14 @@ class TestPrefix(MarqoTestCase):
                 splitMethod=TextSplitMethod.Character
             ),
             image_preprocessing=ImagePreProcessing(),
+            video_preprocessing=VideoPreProcessing(
+                splitLength=20,
+                splitOverlap=1,
+            ),
+            audio_preprocessing=AudioPreProcessing(
+                splitLength=20,
+                splitOverlap=1,
+            ),
             distance_metric=DistanceMetric.DotProduct,
             vector_numeric_type=VectorNumericType.Float,
             hnsw_config=HnswConfig(

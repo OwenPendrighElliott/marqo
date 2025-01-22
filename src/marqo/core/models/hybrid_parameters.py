@@ -2,7 +2,7 @@ from enum import Enum
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import validator, root_validator
+from pydantic.v1 import validator, root_validator
 
 from marqo.base_model import StrictBaseModel
 from marqo.tensor_search.models.score_modifiers_object import ScoreModifierLists
@@ -69,9 +69,11 @@ class HybridParameters(StrictBaseModel):
 
         # score_modifiers_lexical can only be defined for Lexical, RRF, NormalizeLinear
         if values.get('scoreModifiersLexical') is not None:
-            if values.get('rankingMethod') not in [RankingMethod.Lexical, RankingMethod.RRF]:
+            if not (values.get('rankingMethod') in [RankingMethod.Lexical, RankingMethod.RRF] or
+                    values.get('retrievalMethod') == RetrievalMethod.Lexical):
                 raise ValueError(
-                    "'scoreModifiersLexical' can only be defined for 'lexical', 'rrf' ranking methods")  # TODO: re-add normalize_linear
+                    "'scoreModifiersLexical' can only be defined for 'lexical', 'rrf' ranking methods or "
+                    "'lexical' retrieval method.")  # TODO: re-add normalize_linear
 
         # score_modifiers_tensor can only be defined for Tensor, RRF, NormalizeLinear
         if values.get('scoreModifiersTensor') is not None:

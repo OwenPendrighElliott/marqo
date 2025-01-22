@@ -1,17 +1,25 @@
 from timeit import default_timer as timer
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import marqo.api.exceptions as api_exceptions
-from marqo.core.exceptions import UnsupportedFeatureError, ParsingError
+from marqo.core.constants import MARQO_DOC_ID
+from marqo.core.models.add_docs_params import AddDocsParams
+from marqo.core.exceptions import UnsupportedFeatureError, ParsingError, InternalError
 from marqo.core.index_management.index_management import IndexManagement
-from marqo.core.models.marqo_index import IndexType
+from marqo.core.models.marqo_add_documents_response import MarqoAddDocumentsResponse, MarqoAddDocumentsItem
+from marqo.core.models.marqo_index import IndexType, SemiStructuredMarqoIndex, StructuredMarqoIndex, \
+    UnstructuredMarqoIndex
 from marqo.core.models.marqo_update_documents_response import MarqoUpdateDocumentsResponse, MarqoUpdateDocumentsItem
-from marqo.core.vespa_index import for_marqo_index as vespa_index_factory
+from marqo.core.semi_structured_vespa_index.semi_structured_add_document_handler import \
+    SemiStructuredAddDocumentsHandler, SemiStructuredFieldCountConfig
+from marqo.core.structured_vespa_index.structured_add_document_handler import StructuredAddDocumentsHandler
+from marqo.core.unstructured_vespa_index.unstructured_add_document_handler import UnstructuredAddDocumentsHandler
+from marqo.core.vespa_index.vespa_index import for_marqo_index as vespa_index_factory
+from marqo.logging import get_logger
 from marqo.vespa.models import UpdateDocumentsBatchResponse, VespaDocument
 from marqo.vespa.models.delete_document_response import DeleteAllDocumentsResponse
+from marqo.vespa.models.feed_response import FeedBatchResponse
 from marqo.vespa.vespa_client import VespaClient
-from marqo.core.constants import MARQO_DOC_ID
-from marqo.logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -22,6 +30,23 @@ class Document:
     def __init__(self, vespa_client: VespaClient, index_management: IndexManagement):
         self.vespa_client = vespa_client
         self.index_management = index_management
+
+    def add_documents(self, add_docs_params: AddDocsParams,
+                      field_count_config=SemiStructuredFieldCountConfig()) -> MarqoAddDocumentsResponse:
+        marqo_index = self.index_management.get_index(add_docs_params.index_name)
+
+        if isinstance(marqo_index, StructuredMarqoIndex):
+            add_docs_handler = StructuredAddDocumentsHandler(marqo_index, add_docs_params, self.vespa_client)
+        elif isinstance(marqo_index, SemiStructuredMarqoIndex):
+            add_docs_handler = SemiStructuredAddDocumentsHandler(marqo_index, add_docs_params,
+                                                                 self.vespa_client, self.index_management,
+                                                                 field_count_config)
+        elif isinstance(marqo_index, UnstructuredMarqoIndex):
+            add_docs_handler = UnstructuredAddDocumentsHandler(marqo_index, add_docs_params, self.vespa_client)
+        else:
+            raise InternalError(f"Unknown index type {type(marqo_index)}")
+
+        return add_docs_handler.add_documents()
 
     def delete_all_docs_by_index_name(self, index_name: str) -> int:
         """Delete all documents in the given index by index name.
@@ -79,7 +104,7 @@ class Document:
         Return:
             MarqoUpdateDocumentsResponse containing the response of the partial update operation
         """
-        if marqo_index.type == IndexType.Unstructured:
+        if marqo_index.type in [IndexType.Unstructured, IndexType.SemiStructured]:
             raise UnsupportedFeatureError("Partial document update is not supported for unstructured indexes. "
                                           "Please use add_documents with use_existing_tensor=True instead")
         elif marqo_index.type == IndexType.Structured:
@@ -127,20 +152,22 @@ class Document:
             MarqoUpdateDocumentsResponse containing the response of the partial update operation
         """
 
-        new_items: List[MarqoUpdateDocumentsItem] = []
+        items: List[MarqoUpdateDocumentsItem] = []
+
+        errors = responses.errors
 
         if responses is not None:
             for resp in responses.responses:
                 doc_id = resp.id.split('::')[-1] if resp.id else None
-                item = MarqoUpdateDocumentsItem(
-                    id=doc_id, status=resp.status, message=resp.message
-                )
-                new_items.append(item)
+                status, message = self.vespa_client.translate_vespa_document_response(resp.status, None)
+                new_item = MarqoUpdateDocumentsItem(id=doc_id, status=status, message=message, error=message)
+                items.append(new_item)
 
         for loc, error_info in unsuccessful_docs:
-            new_items.insert(loc, error_info)
+            items.insert(loc, error_info)
+            errors = True
 
-        return MarqoUpdateDocumentsResponse(index_name=index_name, items=new_items,
+        return MarqoUpdateDocumentsResponse(errors=errors, index_name=index_name, items=items,
                                             processingTimeMs=(timer() - start_time) * 1000)
 
     def remove_duplicated_documents(self, documents: List) -> Tuple[List, set]:
@@ -171,3 +198,38 @@ class Document:
         # Reverse to preserve order in request
         docs.reverse()
         return docs, doc_ids
+
+    def translate_add_documents_response(self, responses: Optional[FeedBatchResponse],
+                                         index_name: str,
+                                         unsuccessful_docs: List,
+                                         add_docs_processing_time_ms: float) \
+            -> MarqoAddDocumentsResponse:
+        """Translate Vespa FeedBatchResponse into MarqoAddDocumentsResponse.
+
+        Args:
+            responses: The response from Vespa
+            index_name: The name of the index
+            unsuccessful_docs: The list of unsuccessful documents
+            add_docs_processing_time_ms: The processing time of the add documents operation, in milliseconds
+
+        Return:
+            MarqoAddDocumentsResponse: The response of the add documents operation
+        """
+
+        new_items: List[MarqoAddDocumentsItem] = []
+        # A None response means no documents are sent to Vespa. Probably all documents are invalid and blocked in Marqo.
+        errors = responses.errors if responses is not None else True
+
+        if responses is not None:
+            for resp in responses.responses:
+                doc_id = resp.id.split('::')[-1] if resp.id else None
+                status, message = self.vespa_client.translate_vespa_document_response(resp.status, resp.message)
+                new_item = MarqoAddDocumentsItem(id=doc_id, status=status, message=message)
+                new_items.append(new_item)
+
+        for loc, error_info in unsuccessful_docs:
+            new_items.insert(loc, error_info)
+            errors = True
+
+        return MarqoAddDocumentsResponse(errors=errors, index_name=index_name, items=new_items,
+                                         processingTimeMs=add_docs_processing_time_ms)

@@ -29,6 +29,10 @@ def default_env_vars() -> dict:
         EnvVars.MARQO_THREAD_EXPIRY_TIME: 1800,  # 30 minutes
         EnvVars.MARQO_ENABLE_THROTTLING: "TRUE",
         EnvVars.MARQO_LOG_LEVEL: "info",
+        EnvVars.MARQO_MEDIA_DOWNLOAD_THREAD_COUNT_PER_REQUEST: 5,
+        EnvVars.MARQO_IMAGE_DOWNLOAD_THREAD_COUNT_PER_REQUEST: 20,
+        EnvVars.MARQO_MAX_SEARCH_VIDEO_AUDIO_FILE_SIZE: 387973120,  # 370 megabytes in bytes
+        EnvVars.MARQO_MAX_ADD_DOCS_VIDEO_AUDIO_FILE_SIZE: 387973120,  # 370 megabytes in bytes
         # This env variable is set to "info" by default in run_marqo.sh, which overrides this value
         EnvVars.MARQO_MAX_CPU_MODEL_MEMORY: 4,
         EnvVars.MARQO_MAX_CUDA_MODEL_MEMORY: 4,  # For multi-GPU, this is the max memory for each GPU.
@@ -47,5 +51,9 @@ def default_env_vars() -> dict:
         EnvVars.MARQO_INFERENCE_CACHE_SIZE: 0,
         EnvVars.MARQO_INFERENCE_CACHE_TYPE: "LRU",
         EnvVars.MARQO_BEST_AVAILABLE_DEVICE: "cpu",      # on_start_script will determine this.
+        EnvVars.MARQO_MAX_TENSOR_FIELD_COUNT_UNSTRUCTURED: 100,
+        EnvVars.MARQO_MAX_LEXICAL_FIELD_COUNT_UNSTRUCTURED: 100,
+        EnvVars.MARQO_INDEX_DEPLOYMENT_LOCK_TIMEOUT: 5,  # index operations acquire this distributed lock with a timeout
         EnvVars.ZOOKEEPER_CONNECTION_TIMEOUT: 15,
+        EnvVars.MARQO_ENABLE_VIDEO_GPU_ACCELERATION: None   # on_start_script will determine this.
     }

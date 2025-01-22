@@ -1,10 +1,8 @@
 import argparse
-import json
 
 import os
-import shutil
-import re
-import subprocess
+
+VESPA_VERSION=os.getenv('VESPA_VERSION', '8.431.32')  # default version baked into marqo-base:44
 
 
 def start(args):
@@ -14,7 +12,11 @@ def start(args):
               "--name vespa "
               "--hostname vespa-container "
               "--publish 8080:8080 --publish 19071:19071 --publish 2181:2181 --publish 127.0.0.1:5005:5005 "
+<<<<<<< HEAD
               "vespaengine/vespa:8.367.14")
+=======
+              f"vespaengine/vespa:{VESPA_VERSION}")
+>>>>>>> origin
 
 
 def restart(args):

@@ -5,11 +5,9 @@ from marqo.core.models import MarqoQuery
 from marqo.core.models.hybrid_parameters import RankingMethod, RetrievalMethod
 from marqo.core.models.marqo_index import *
 from marqo.core.models.marqo_query import MarqoTensorQuery, MarqoLexicalQuery, MarqoHybridQuery
-from marqo.core.models.score_modifier import ScoreModifier, ScoreModifierType
 from marqo.core.structured_vespa_index import common
-from marqo.core.vespa_index import VespaIndex
+from marqo.core.vespa_index.vespa_index import VespaIndex
 from marqo.exceptions import InternalError
-import semver
 
 
 class StructuredVespaIndex(VespaIndex):
@@ -30,6 +28,8 @@ class StructuredVespaIndex(VespaIndex):
         FieldType.ArrayLong: (list, int),
         FieldType.ArrayDouble: (list, (float, int)),
         FieldType.ImagePointer: str,
+        FieldType.VideoPointer: str,
+        FieldType.AudioPointer: str,
         FieldType.MultimodalCombination: dict,
         FieldType.CustomVector: str,
         FieldType.MapInt: (dict, int),
@@ -57,7 +57,7 @@ class StructuredVespaIndex(VespaIndex):
     _MAX_LONG = 9223372036854775807
     _MIN_LONG = -9223372036854775808
 
-    _HYBRID_SEARCH_MINIMUM_VERSION = semver.VersionInfo.parse(constants.MARQO_STRUCTURED_HYBRID_SEARCH_MINIMUM_VERSION)
+    _HYBRID_SEARCH_MINIMUM_VERSION = constants.MARQO_STRUCTURED_HYBRID_SEARCH_MINIMUM_VERSION
 
     def get_vespa_id_field(self) -> str:
         return common.FIELD_ID
@@ -181,7 +181,7 @@ class StructuredVespaIndex(VespaIndex):
 
         # Fields
         for marqo_field in marqo_document:
-            if marqo_field == constants.MARQO_DOC_TENSORS or marqo_field == constants.MARQO_DOC_ID:
+            if marqo_field in [constants.MARQO_DOC_TENSORS, constants.MARQO_DOC_ID]:
                 continue  # process tensor fields later
 
             marqo_value = marqo_document[marqo_field]
@@ -299,7 +299,6 @@ class StructuredVespaIndex(VespaIndex):
                             f'{marqo_document[marqo_name]} and {value}'
                         )
                 else:
-
                     marqo_document[marqo_name] = value
             elif field in self._marqo_index.tensor_subfield_map:
                 tensor_field = self._marqo_index.tensor_subfield_map[field]
@@ -372,7 +371,7 @@ class StructuredVespaIndex(VespaIndex):
         if marqo_query.score_modifiers is not None:
             for modifier in marqo_query.score_modifiers:
                 if '.' in modifier.field:
-                    root_modifier_field, subfield = modifier.field.split('.')
+                    root_modifier_field, subfield = modifier.field.split('.', 1)
                 else:
                     root_modifier_field = modifier.field
                 if root_modifier_field not in self._marqo_index.score_modifier_fields_names:
@@ -533,17 +532,31 @@ class StructuredVespaIndex(VespaIndex):
             }
         })
 
+        """
+        # TODO: implement this if no longer using custom searcher for lexical/tensor and tensor/lexical
+        query_inputs.update({
+            f: 1 for f in fields_to_search_lexical
+        })
+        query_inputs.update({
+            f: 1 for f in fields_to_search_tensor
+        })
+        """
+
         # Extract score modifiers
         hybrid_score_modifiers = self._get_hybrid_score_modifiers(marqo_query)
         if hybrid_score_modifiers[constants.MARQO_SEARCH_METHOD_LEXICAL]:
             query_inputs.update(hybrid_score_modifiers[constants.MARQO_SEARCH_METHOD_LEXICAL])
         if hybrid_score_modifiers[constants.MARQO_SEARCH_METHOD_TENSOR]:
             query_inputs.update(hybrid_score_modifiers[constants.MARQO_SEARCH_METHOD_TENSOR])
+        if hybrid_score_modifiers[constants.MARQO_GLOBAL_SCORE_MODIFIERS]:
+            query_inputs.update(hybrid_score_modifiers[constants.MARQO_GLOBAL_SCORE_MODIFIERS])
 
         query = {
             'searchChain': 'marqo',
             'yql': 'PLACEHOLDER. WILL NOT BE USED IN HYBRID SEARCH.',
             'ranking': common.RANK_PROFILE_HYBRID_CUSTOM_SEARCHER,
+            'ranking.rerankCount': marqo_query.limit + marqo_query.offset,
+            # limits the number of results going to phase 2
 
             'model_restrict': self._marqo_index.schema_name,
             'hits': marqo_query.limit,
@@ -562,17 +575,17 @@ class StructuredVespaIndex(VespaIndex):
 
             'marqo__hybrid.retrievalMethod': marqo_query.hybrid_parameters.retrievalMethod,
             'marqo__hybrid.rankingMethod': marqo_query.hybrid_parameters.rankingMethod,
-            'marqo__hybrid.tensorScoreModifiersPresent': True if hybrid_score_modifiers[constants.MARQO_SEARCH_METHOD_TENSOR] else False,
-            'marqo__hybrid.lexicalScoreModifiersPresent': True if hybrid_score_modifiers[constants.MARQO_SEARCH_METHOD_LEXICAL] else False,
             'marqo__hybrid.verbose': marqo_query.hybrid_parameters.verbose
         }
+
         query = {k: v for k, v in query.items() if v is not None}
 
-        if marqo_query.hybrid_parameters.rankingMethod in {RankingMethod.RRF}: # TODO: Add NormalizeLinear
+        if marqo_query.hybrid_parameters.rankingMethod in {RankingMethod.RRF}:  # TODO: Add NormalizeLinear
             query["marqo__hybrid.alpha"] = marqo_query.hybrid_parameters.alpha
-
-        if marqo_query.hybrid_parameters.rankingMethod in {RankingMethod.RRF}:
             query["marqo__hybrid.rrf_k"] = marqo_query.hybrid_parameters.rrfK
+
+        if marqo_query.rerank_depth is not None:
+            query["marqo__hybrid.rerankDepthGlobal"] = marqo_query.rerank_depth
 
         return query
 
@@ -855,6 +868,7 @@ class StructuredVespaIndex(VespaIndex):
 
     def _verify_marqo_tensor_field(self, field_name: str, field_value: Dict[str, Any]):
         if not set(field_value.keys()) == {constants.MARQO_DOC_CHUNKS, constants.MARQO_DOC_EMBEDDINGS}:
+            # TODO should this be InvalidTensorFieldError?
             raise InternalError(f'Invalid tensor field {field_name}. '
                                 f'Expected keys {constants.MARQO_DOC_CHUNKS}, {constants.MARQO_DOC_EMBEDDINGS} '
                                 f'but found {", ".join(field_value.keys())}')
@@ -951,8 +965,7 @@ class StructuredVespaIndex(VespaIndex):
                     closest_tensor_field = tensor_field
 
         if closest_tensor_field is None:
-            raise VespaDocumentParsingError('Failed to extract highlights from Vespa document. Could not find '
-                                            'closest tensor field in response')
+            return []
 
         # Get chunk index
         chunk_index_str = next(iter(

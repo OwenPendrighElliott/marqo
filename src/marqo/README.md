@@ -7,21 +7,30 @@ See [here](https://github.com/marqo-ai/marqo/blob/mainline/CONTRIBUTING.md#unit-
 ## Running Marqo locally (outside of docker) for development
 
 There are two ways to run Marqo locally (outside of docker) for development: Option A. through `uvicorn`, 
-Option B. through your IDE (e.g. PyCharm). 
+Option B. through your IDE (e.g., PyCharm). 
 We highly recommend using the Option A, as it allows you to set breakpoints and debug Marqo. 
 Before running Marqo locally, you will need to do some preparations to set up Vespa locally.
 
 ### Preparations
 
-1. Clone the Marqo GitHub repo and cd into it
+1. Clone the Marqo GitHub repo and marqo-base repo
 ```bash
 git clone https://github.com/marqo-ai/marqo.git
-cd marqo
+git clone https://github.com/marqo-ai/marqo-base.git
 ```
 
-2. Install Marqo dependencies
+2. Install Marqo dependencies. Please choose the appropriate requirements file based on your environment.
+**For AMD machine**, no matter you have a GPU or not: 
 ```bash
-pip install -r requirements.dev.txt
+pip install -r marqo-base/requirements/amd64-gpu-requirements.txt  # For AMD machine, no matter you have a GPU or not
+```
+**For ARM machine**:
+```bash
+pip install -r marqo-base/requirements/arm64-requirements.txt  # For ARM machine
+```
+The above requirements are for running Marqo locally. If you need to run tests, you need:
+```bash
+pip install -r marqo/requirements.dev.txt  # For test purposes
 ```
 
 3. Pull and run the Vespa docker image
@@ -36,17 +45,44 @@ docker run --detach --name vespa --hostname vespa-tutorial --publish 8080:8080 -
 You can verify that Vespa has been set up correctly by visiting `http://localhost:8080` in your browser.
 
 
-5. Start triton inference server
+5. Start ingrain inference server
 ```bash
-(cd src/marqo && mkdir -p cache && cd cache && docker run --detach -it --shm-size=256m --rm -p8000:8000 -p8001:8001 -p8002:8002 -v ${PWD}/model_repository:/models nvcr.io/nvidia/tritonserver:24.07-py3 tritonserver --model-repository=/models --model-control-mode=explicit)
+docker run --name ingrain_server -p 8686:8686 -p 8687:8687 --gpus all owenpelliott/ingrain-server:latest
 ```
 
 
 ### Option A. Run the Marqo application locally (outside of docker) through IDE
 Now you can run Marqo locally through your IDE (e.g. PyCharm) by following the steps below.
 
-5. Open the Marqo project in your IDE (e.g. PyCharm) and go to the file `src/marqo/tensor_search/api.py`
-6. Set up your [debug configuration](https://www.jetbrains.com/help/pycharm/creating-run-debug-configuration-for-tests.html)
+Install Java Development Kit: 
+
+You can install the Java Development Kit (JDK) by following the instructions [here](https://docs.oracle.com/en/java/javase/22/install/overview-jdk-installation.html). 
+Post installation, remember to set JAVA_HOME Environment Variable and to add Java to the PATH Environment Variable.
+You can verify the installation by running the following command:
+```bash
+java -version
+```
+
+Install Maven: 
+
+You can install Maven by following the instructions [here](https://maven.apache.org/install.html).
+Similar to setting Java, you need to add Maven to the PATH Environment Variable.
+Verify Maven installation by running the following command: 
+```bash
+mvn -version
+```
+
+6. After this you need to create a JAR file. To do that, go into the Vespa directory in your local Marqo repository by doing `cd vespa`, and run 
+```bash
+mvn clean package
+```
+After running this command, you will see that a target folder gets created in the vespa directory, which contains a JAR file called marqo-custom-searchers-deploy.jar. This JAR file is used to deploy the custom searchers to Vespa.
+
+### Option A. Run the Marqo application locally (outside of docker) through IDE
+Now you can run Marqo locally through your IDE by following the steps below.
+
+7. Open the Marqo project in your IDE and go to the file `src/marqo/tensor_search/api.py`
+8. Set up your [debug configuration](https://www.jetbrains.com/help/pycharm/creating-run-debug-configuration-for-tests.html)
 to run `api.py` with the following environment variables:
 ```
 MARQO_ENABLE_BATCH_APIS=true
@@ -56,14 +92,14 @@ VESPA_CONFIG_URL=http://localhost:19071
 VESPA_DOCUMENT_URL=http://localhost:8080
 VESPA_QUERY_URL=http://localhost:8080
 ```
-7. Now you can Debug this file directly from your IDE (e.g. PyCharm) to start Marqo locally.
-8. Set breakpoints in the project for better debugging experience.
+9. Now you can debug this file directly from your IDE (e.g., PyCharm) to start Marqo locally.
+10. Set breakpoints in the project for better debugging experience.
 
 
 ### Option B. Run the Marqo application locally (outside of docker) through `uvicorn`
 Finish the preparations above, then run the following command:
 
-5. Set up the environment variables and run Marqo through `uvicorn`
+7. Set up the environment variables and run Marqo through `uvicorn`
 ```bash
 export MARQO_ENABLE_BATCH_APIS=true
 export MARQO_LOG_LEVEL=debug
@@ -131,11 +167,11 @@ Marqo outside Docker will rely on the system setup to use the GPU. If you can us
 #### Using Marqo within Docker
 Currently, only CUDA based (Nvidia) GPU's are supported. If you have a GPU on the host machine and want to use it with Marqo, there are two things to do; 
 1. Add the `--gpus all` flag to the `docker run` command. This command excluded from the above but will allow the GPU's to be used within Marqo. For example, in the steps B., C., and D., above `--gpus all` should be added after the 
-`docker run --name marqo` part of the command, e.g. B. from above would become,
+`docker run --name marqo` part of the command, e.g., B. from above would become,
 ```bash
 docker rm -f marqo &&
      DOCKER_BUILDKIT=1 docker build . -t marqo_docker_0 && 
-     docker docker run --name --gpus all marqo -p 8882:8882 marqo_docker_0
+     docker run --name marqo --gpus all -p 8882:8882 marqo_docker_0
 ```
 note the `--gpus all` has been added.
 
@@ -166,7 +202,7 @@ Edit the SSH config file with `nano ~/.ssh/config` then insert the line: `Server
 3. Run Marqo
 
 ```bash
-docker docker run --name  marqo -p 8882:8882 marqoai/marqo:latest
+docker run --name  marqo -p 8882:8882 marqoai/marqo:latest
 ```
 
 #### Troubleshooting

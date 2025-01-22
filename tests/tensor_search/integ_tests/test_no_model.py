@@ -5,7 +5,7 @@ import numpy as np
 
 from marqo.api.exceptions import InvalidArgError
 from marqo.core.exceptions import IndexNotFoundError
-from pydantic.error_wrappers import ValidationError
+from pydantic.v1.error_wrappers import ValidationError
 from marqo.core.models.marqo_index import *
 from marqo.core.models.marqo_index_request import FieldRequest
 from marqo.tensor_search import tensor_search
@@ -119,11 +119,14 @@ class TestNoModel(MarqoTestCase):
                     index_name == self.unstructured_index_with_no_model else None
                 mappings = {"custom_field_1": {"type": "custom_vector"}} if \
                     index_name == self.unstructured_index_with_no_model else None
-                r = tensor_search.add_documents(config=self.config,
-                                                add_docs_params=AddDocsParams(index_name=index_name,
-                                                                          docs=documents,
-                                                                          tensor_fields=tensor_fields,
-                                                                          mappings=mappings))
+                r = self.add_documents(
+                    config=self.config,
+                    add_docs_params=AddDocsParams(
+                        index_name=index_name,
+                        docs=documents,
+                        tensor_fields=tensor_fields,
+                        mappings=mappings)
+                ).dict(exclude_none=True, by_alias=True)
                 self.assertEqual(r["errors"], True)
                 self.assertIn("Cannot vectorise anything with 'no_model'", r["items"][0]["error"])
                 self.assertEqual(400, r["items"][0]["status"])
@@ -180,8 +183,8 @@ class TestNoModel(MarqoTestCase):
                                                 docs=docs,
                                                 tensor_fields=tensor_fields,
                                                 mappings=mappings)
-                _ = tensor_search.add_documents(config=self.config,
-                                                add_docs_params=add_docs_params)
+                _ = self.add_documents(config=self.config,
+                                       add_docs_params=add_docs_params)
 
                 r = tensor_search.search(config=self.config, index_name=index_name, text=None,
                                          search_method="tensor",

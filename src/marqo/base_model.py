@@ -1,7 +1,7 @@
-from pydantic import BaseModel
+from pydantic import v1 as pydantic
 
 
-class MarqoBaseModel(BaseModel):
+class MarqoBaseModel(pydantic.BaseModel):
     class Config:
         allow_population_by_field_name = True  # accept both real name and alias (if present)
         validate_assignment = True
